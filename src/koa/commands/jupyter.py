@@ -252,6 +252,12 @@ def register_parser(subparsers) -> argparse.ArgumentParser:
         default="16G",
         help="Memory allocation (default: 16G).",
     )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=60,
+        help="Max minutes to wait for allocation (default: 60).",
+    )
     add_common_arguments(parser)
     return parser
 
@@ -264,6 +270,7 @@ def handle(args, config: Config) -> int:
     walltime: str = args.time
     gpus: int = args.gpus
     conda_env: str | None = args.conda_env
+    timeout: int = args.timeout * 60  # convert minutes to seconds
 
     # 1. Find a free local port
     if not _port_is_free(local_port):
@@ -345,7 +352,8 @@ def handle(args, config: Config) -> int:
 
         # 6. Poll until running
         node = _wait_for_running(
-            config, job_id, partition=partition, gpu_type=gpu_type
+            config, job_id, partition=partition, gpu_type=gpu_type,
+            timeout=timeout,
         )
         console.print(f"Job [bold]{job_id}[/bold] running on [bold cyan]{node}[/bold cyan].")
 
