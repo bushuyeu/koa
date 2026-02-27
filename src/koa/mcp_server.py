@@ -1987,6 +1987,124 @@ def koa_distributed_show(
     return json.dumps(cfg, indent=2)
 
 
+@mcp.tool()
+def koa_jupyter(
+    time: str = "04:00:00",
+    gpus: int = 1,
+    gpu_type: Optional[str] = None,
+    partition: Optional[str] = None,
+    mem: str = "16G",
+    lab: bool = True,
+    conda_env: Optional[str] = None,
+) -> str:
+    """Submit a Jupyter notebook server on a GPU compute node.
+
+    Returns connection info (job ID, node, URL with token) as JSON.
+    NOTE: The MCP server cannot hold a persistent SSH tunnel, so the caller
+    must establish their own tunnel using the returned node and port info,
+    or instruct the user to run ``koa jupyter`` from the CLI for the
+    full automated experience.
+
+    Args:
+        time: Walltime limit (default: 04:00:00).
+        gpus: Number of GPUs (default: 1).
+        gpu_type: GPU type (default: auto-select best available).
+        partition: Partition (default: from config).
+        mem: Memory allocation (default: 16G).
+        lab: True for jupyter lab, False for jupyter notebook.
+        conda_env: Conda environment to activate before starting Jupyter.
+    """
+    import secrets
+    import random
+
+    config = _load_cfg()
+    part = partition or config.default_partition or "kill-shared"
+
+    # Auto-select GPU
+    selected_gpu = gpu_type or select_best_gpu(config, part)
+
+    # Generate token and random remote port
+    token = secrets.token_hex(24)
+    remote_port = random.randint(49152, 65535)
+
+    # Build SLURM script
+    jupyter_cmd = "jupyter lab" if lab else "jupyter notebook"
+    conda_block = ""
+    if conda_env:
+        conda_block = (
+            '\neval "$(conda shell.bash hook)"\n'
+            f"conda activate {conda_env}\n"
+        )
+
+    script_content = (
+        "#!/bin/bash\n"
+        f"{conda_block}"
+        f"{jupyter_cmd} \\\n"
+        f"    --no-browser \\\n"
+        f"    --ip=0.0.0.0 \\\n"
+        f"    --port={remote_port} \\\n"
+        f"    --ServerApp.token='{token}' \\\n"
+        f"    --ServerApp.allow_origin='*'\n"
+    )
+
+    script_hex = secrets.token_hex(8)
+    remote_script = f"/tmp/koa-jupyter-{script_hex}.sh"
+
+    try:
+        run_ssh(
+            config,
+            f"cat > {remote_script} << 'KOAEOF'\n{script_content}KOAEOF",
+            capture_output=True,
+        )
+    except SSHError as exc:
+        return json.dumps({"error": f"Failed to write remote script: {exc}"})
+
+    # Submit
+    gres = f"gpu:{selected_gpu}:{gpus}"
+    sbatch_cmd = [
+        "sbatch",
+        "--partition", part,
+        "--gres", gres,
+        "--mem", mem,
+        "--time", time,
+        "--job-name", "koa-jupyter",
+        "--output", f"/tmp/koa-jupyter-{script_hex}.log",
+        remote_script,
+    ]
+
+    try:
+        result = run_ssh(config, sbatch_cmd, capture_output=True)
+    except SSHError as exc:
+        return json.dumps({"error": f"sbatch failed: {exc}"})
+
+    import re
+    output = (result.stdout or "").strip()
+    match = re.search(r"Submitted batch job (\d+)", output)
+    if not match:
+        return json.dumps({"error": f"Could not parse job ID: {output}"})
+
+    job_id = match.group(1)
+
+    return json.dumps({
+        "job_id": job_id,
+        "gpu_type": selected_gpu,
+        "gpus": gpus,
+        "partition": part,
+        "remote_port": remote_port,
+        "token": token,
+        "remote_script": remote_script,
+        "status": "submitted",
+        "instructions": (
+            f"Job {job_id} submitted. To connect:\n"
+            f"1. Wait for the job to start: squeue -j {job_id}\n"
+            f"2. Find the node: squeue -j {job_id} -h -o '%N'\n"
+            f"3. Open SSH tunnel: ssh -N -L 8888:<node>:{remote_port} {config.login}\n"
+            f"4. Open in browser: http://localhost:8888/?token={token}\n"
+            f"\nOr use the CLI for automatic tunnel: koa jupyter"
+        ),
+    }, indent=2)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

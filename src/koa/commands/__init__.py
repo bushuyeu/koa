@@ -70,6 +70,7 @@ from . import (  # noqa: E402
     anywhere,
     env as env_cmd,
     budget,
+    jupyter,
 )
 
 ALL_COMMANDS = [
@@ -91,4 +92,5 @@ ALL_COMMANDS = [
     anywhere,
     env_cmd,
     budget,
+    jupyter,
 ]

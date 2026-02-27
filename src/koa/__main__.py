@@ -65,6 +65,7 @@ from .commands.anywhere import register_anywhere_args, handle_anywhere_submit
 from .commands import distributed as cmd_distributed
 from .commands.distributed import register_distributed_args, handle_distributed_submit
 from .commands import budget as cmd_budget
+from .commands import jupyter as cmd_jupyter
 
 DEFAULT_SNAPSHOT_EXCLUDES: list[str] = [
     ".git/",
@@ -465,6 +466,7 @@ def _build_parser() -> argparse.ArgumentParser:
     cmd_anywhere.register_parser(subparsers)
     cmd_env.register_parser(subparsers)
     cmd_budget.register_parser(subparsers)
+    cmd_jupyter.register_parser(subparsers)
 
     # --- Add chain/off-peak flags to submit parser ---
     register_chain_args(submit_parser)
@@ -1338,6 +1340,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return cmd_env.handle(args, config)
         if args.command == "budget":
             return cmd_budget.handle(args, config)
+        if args.command == "jupyter":
+            return cmd_jupyter.handle(args, config)
     except (SSHError, FileNotFoundError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
