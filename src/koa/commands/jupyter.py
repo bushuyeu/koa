@@ -248,12 +248,15 @@ def handle(args, config: Config) -> int:
     token = secrets.token_hex(24)
     remote_port = random.randint(49152, 65535)
 
-    # 3. Auto-select GPU (queue-aware, filtered by requested GPU count)
+    # 3. GPU selection (skip for CPU-only mode)
     gpu_type = args.gpu_type
-    if not gpu_type:
+    if gpus > 0 and not gpu_type:
         console.print("Auto-selecting best available GPU...")
         gpu_type = select_best_gpu(config, partition, min_gpus=gpus)
         print_gpu_selection(config, gpu_type, gpus, partition, console=console)
+    elif gpus == 0:
+        console.print("[bold]CPU-only mode[/bold] (no GPU requested)")
+        gpu_type = None
 
     # 4. Build SLURM script and write to remote
     script_content = _build_slurm_script(
@@ -276,17 +279,17 @@ def handle(args, config: Config) -> int:
         return 1
 
     # 5. Submit the job
-    gres = f"gpu:{gpu_type}:{gpus}"
     sbatch_cmd = [
         "sbatch",
         "--partition", partition,
-        "--gres", gres,
         "--mem", mem,
         "--time", walltime,
         "--job-name", "koa-jupyter",
         "--output", f"/tmp/koa-jupyter-{script_hex}.log",
-        remote_script,
     ]
+    if gpu_type and gpus > 0:
+        sbatch_cmd.extend(["--gres", f"gpu:{gpu_type}:{gpus}"])
+    sbatch_cmd.append(remote_script)
 
     job_id: str | None = None
     tunnel: subprocess.Popen | None = None
