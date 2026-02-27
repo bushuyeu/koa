@@ -27,15 +27,15 @@ except ImportError:  # pragma: no cover - fallback when executed outside package
     PACKAGE_ROOT = Path(__file__).resolve().parent
     if str(PACKAGE_ROOT.parent) not in sys.path:
         sys.path.insert(0, str(PACKAGE_ROOT.parent))
-    from koa_cli.config import Config, DEFAULT_BACKEND_NAME, DEFAULT_CONFIG_PATH, load_config  # type: ignore
-    from koa_cli.dashboard_data import (
+    from koa.config import Config, DEFAULT_BACKEND_NAME, DEFAULT_CONFIG_PATH, load_config  # type: ignore
+    from koa.dashboard_data import (
         collect_job_records,
         fetch_gpu_nodes,
         get_job_log_tail,
         job_record_to_dict,
         last_updated_timestamp,
     )
-    from koa_cli.runs import delete_run_entry, set_run_description  # type: ignore
+    from koa.runs import delete_run_entry, set_run_description  # type: ignore
 
 
 def _parse_args() -> argparse.Namespace:

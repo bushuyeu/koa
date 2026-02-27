@@ -205,9 +205,9 @@ def _collect_export_envs(
 def _load_template(name: str) -> str:
     """Load a text template bundled with the CLI."""
     try:
-        return resources.files("koa_cli.templates").joinpath(name).read_text(encoding="utf-8")
+        return resources.files("koa.templates").joinpath(name).read_text(encoding="utf-8")
     except AttributeError:  # pragma: no cover - fallback for Python <3.9
-        return resources.read_text("koa_cli.templates", name)
+        return resources.read_text("koa.templates", name)
 
 
 def _prompt(value: Optional[str], question: str, *, default: Optional[str] = None, required: bool = False) -> str:
@@ -534,7 +534,7 @@ def _setup(args: argparse.Namespace) -> int:
         or backend_defaults.get("remote_root")
         or existing.get("remote_root")
         or (existing.get("remote", {}) or {}).get("root")
-        or f"/mnt/lustre/koa/scratch/{user}/koa-cli"
+        or f"/mnt/lustre/koa/scratch/{user}/koa"
     )
     remote_root = _prompt(
         args.remote_root,
@@ -798,7 +798,7 @@ def _init_project(args: argparse.Namespace) -> int:
     remote_root_value = (
         backend_entry.get("remote_root")
         or data.get("remote_root")
-        or f"/mnt/lustre/koa/scratch/{user}/koa-cli"
+        or f"/mnt/lustre/koa/scratch/{user}/koa"
     )
     remote_root = Path(remote_root_value).expanduser()
 
@@ -1158,12 +1158,12 @@ def _dashboard(args: argparse.Namespace, config: Config) -> int:
         import streamlit  # type: ignore  # noqa: F401
     except ImportError:
         print(
-            "Streamlit is not installed. Install it with `pip install koa-cli[dashboard]` or `pip install streamlit`.",
+            "Streamlit is not installed. Install it with `pip install koa[dashboard]` or `pip install streamlit`.",
             file=sys.stderr,
         )
         return 1
 
-    script = resources.files("koa_cli").joinpath("dashboard_app.py")
+    script = resources.files("koa").joinpath("dashboard_app.py")
     script_path = str(script)
     if not os.path.exists(script_path):
         print("Unable to locate the dashboard app script.", file=sys.stderr)

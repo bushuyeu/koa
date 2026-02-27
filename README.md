@@ -107,7 +107,7 @@ backends:
   - cluster_name: koa
     user: yosubs
     host: koa.its.hawaii.edu
-    remote_root: /mnt/lustre/koa/scratch/yosubs/koa-cli
+    remote_root: /mnt/lustre/koa/scratch/yosubs/koa
     local_root: ~/koa-projects
     default_partition: kill-shared
     default_constraint: hopper
@@ -117,7 +117,7 @@ backends:
   - cluster_name: delta
     user: yosubs
     host: login.delta.ncsa.illinois.edu
-    remote_root: /projects/yosubs/koa-cli
+    remote_root: /projects/yosubs/koa
     local_root: ~/delta-projects
     default_partition: gpuA100x4  # leave blank if cluster picks a default
     default_constraint: ""        # unset to avoid hopper-only behavior
@@ -346,8 +346,8 @@ Use the sidebar’s refresh button to force a reread of Slurm data; otherwise th
 
 `koa setup` captures two roots:
 
-- **Remote root** (e.g. `/mnt/lustre/koa/scratch/<user>/koa-cli`)
-- **Local root** (e.g. `~/.koa-cli`)
+- **Remote root** (e.g. `/mnt/lustre/koa/scratch/<user>/koa`)
+- **Local root** (e.g. `~/.koa`)
 
 For a project named `<project>`, the CLI derives:
 
@@ -364,7 +364,7 @@ Local : <local_root>/projects/<project>/jobs/<timestamp[_desc]>/{repo,run_metada
 
 ## Sample SLURM script
 
-Minimal templates live under `src/koa_cli/templates/`. Start from `basic_job.slurm` and adapt the resources, modules, and commands to your workload (including any `#SBATCH --gres` lines you require). The CLI sets `KOA_ML_RESULTS_ROOT` automatically so jobs can collect outputs in the directory that `koa runs sync` mirrors locally once they finish.
+Minimal templates live under `src/koa/templates/`. Start from `basic_job.slurm` and adapt the resources, modules, and commands to your workload (including any `#SBATCH --gres` lines you require). The CLI sets `KOA_ML_RESULTS_ROOT` automatically so jobs can collect outputs in the directory that `koa runs sync` mirrors locally once they finish.
 
 Running `koa init` also drops a project-specific `scripts/basic_job.slurm` and `scripts/setup_env.sh` that you can customise; they mirror the global defaults captured by `koa setup`. The default config watches files like `scripts/setup_env.sh`, `requirements.txt`, and `pyproject.toml`, so changing any of them automatically triggers a virtualenv rebuild on the next submission.
 

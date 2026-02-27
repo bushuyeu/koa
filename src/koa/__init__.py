@@ -1,5 +1,5 @@
 """
-koa_cli package entrypoint.
+koa package entrypoint.
 
 Lightweight CLI and helpers for submitting and managing KOA SLURM jobs.
 """
