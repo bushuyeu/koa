@@ -216,6 +216,8 @@ Every submitted job includes a `run_metadata/` folder under its results director
   - **Auto GPU selection** is enabled by default. The CLI queries `sinfo` for idle/mix nodes on the target partition, ranks available GPU types by priority (H200 > H100 > A100 > A40 > L40 > A30 > V100 > RTX2080Ti), and injects the appropriate `--gres=gpu:<type>:<count>` flag. The GPU count is read from `#SBATCH --gres=gpu:N` in your script (defaults to 1).
   - Pass `--no-auto-gpu` to disable this behavior, or use `--gpus` / `--gres` to override manually.
   - **`--chain N`** – split the job into N dependent segments. Each segment runs for `--chain-time` (default: 4h) and automatically continues the next with `--dependency=afterok`. Jobs receive `SLURM_CHAIN_LINK` and `SLURM_CHAIN_TOTAL` environment variables. Add `--off-peak` to schedule the first segment at 23:00.
+  - **`--distributed`** – multi-node training helper. Auto-detects framework (PyTorch, DeepSpeed, Horovod), injects `MASTER_ADDR`, `MASTER_PORT`, `WORLD_SIZE`, NCCL env vars, and correct `--nodes`/`--ntasks-per-node` flags. Use `--nodes N`, `--gpus-per-node G`, `--framework` to configure.
+  - **`--anywhere`** – cross-cluster smart routing. Probes all configured backends in parallel via `sbatch --test-only`, shows a comparison table of estimated start times, and submits to the fastest cluster.
 - `cancel` – stop a job by ID with `scancel`.
 - `logs` – stream or inspect a job's stdout/stderr in real time via `tail` (stored at `<remote results dir>/<job-id>/job.log` and `job.err`).
 - `runs` – sync and inspect the local catalog of submitted jobs.
@@ -228,6 +230,9 @@ Every submitted job includes a `run_metadata/` folder under its results director
 - `optimize` – find the fastest GPU configuration by running `sbatch --test-only` across all GPU types and partitions. Shows a ranked table of estimated start times so you can pick the config that gets your job running soonest. Use `--time`, `--partition`, `--gpu-type` to constrain the search space.
 - `audit` – analyze recent job history via `sacct` and identify resource waste. Reports memory, time, and CPU efficiency per job with color-coded ratings, suggests right-sized values (130% of actual peak), and summarizes total wasted compute-hours. Use `--days N` to control the lookback window (default: 7).
 - `why` – explain why a job is pending. Decodes SLURM reason codes (Priority, Resources, QOSMaxJobsPerUser, etc.) into plain-language explanations with actionable advice. Shows queue position and estimated wait context.
+- `diagnose` – automatic failure diagnosis for completed/failed jobs. Reads `sacct` exit codes, stderr logs, and matches against known failure patterns (OOM, CUDA OOM, timeout, node failure, NCCL errors, missing files, missing modules). Provides plain-language root cause and actionable fix commands. Use `koa diagnose <job_id>`.
+- `validate` – pre-flight resource validation. Parses `#SBATCH` directives from your script and checks against cluster capabilities: partition exists, GPU type available, memory adequate for GPU, time within QOS limits, GPU code present in script. Automatically runs as advisory warnings during `koa submit`.
+- `budget` – resource allocation tracking. Shows GPU-hours consumed over a period, broken down by state (completed/failed/cancelled) and partition. Displays burn rate, projected allocation exhaustion, and per-job breakdown. Use `--days N` and `--breakdown` for detail.
 
 ### Queue intelligence commands
 
@@ -245,6 +250,15 @@ Every submitted job includes a `run_metadata/` folder under its results director
   - `koa notify status` to check the monitor process.
 - `sweep` – parameter sweep via SLURM job arrays. Provide a JSON or YAML params file defining the sweep grid; KOA computes the cartesian product, uploads a params mapping, and submits with `--array=0-{N-1}`. The job script reads `KOA_SWEEP_PARAMS_FILE` to look up its combination. Use `--max-concurrent N` to throttle.
 - `watch` – monitor the cluster for GPU availability. Polls `sinfo` for idle nodes matching `--gpu-type` and `--partition`, sends a webhook alert when GPUs appear. Use `--once` for a single check, or let it run continuously with Rich Live display. Use `--interval N` to set poll frequency.
+
+### Multi-cluster and environment commands
+
+- `anywhere` – standalone cross-cluster comparison. Probes all configured backends in parallel and shows a ranked table of estimated start times. Use `koa anywhere <script> [--time T]` for comparison without submitting.
+- `distributed show` – preview multi-node training configuration. Shows detected framework, injected env vars, sbatch flags, and launcher command suggestion without submitting. Use `koa distributed show <script>`.
+- `env` – environment snapshot management.
+  - `koa env freeze` – capture current Python environment, CUDA version, and system info into `koa-env.lock.yaml`.
+  - `koa env deploy` – deploy the frozen environment to the remote cluster via SSH.
+  - `koa env diff` – compare local lockfile against the remote environment, showing package mismatches.
 
 All new commands support `--format json` for machine-readable output, `--config` for alternate config files, and `--backend` for multi-cluster targeting.
 

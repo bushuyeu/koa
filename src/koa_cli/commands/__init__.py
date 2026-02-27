@@ -55,6 +55,7 @@ from . import (  # noqa: E402
     optimize,
     audit,
     why,
+    diagnose,
     limits,
     spy,
     priority,
@@ -64,12 +65,19 @@ from . import (  # noqa: E402
     sweep,
     watch,
     chain,
+    distributed,
+    validate,
+    anywhere,
+    env as env_cmd,
+    budget,
 )
 
 ALL_COMMANDS = [
     optimize,
     audit,
     why,
+    diagnose,
+    validate,
     limits,
     spy,
     priority,
@@ -79,4 +87,8 @@ ALL_COMMANDS = [
     sweep,
     watch,
     chain,
+    distributed,
+    anywhere,
+    env_cmd,
+    budget,
 ]

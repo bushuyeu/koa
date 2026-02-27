@@ -1379,6 +1379,615 @@ def koa_resubmit(job_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool: koa_diagnose
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def koa_diagnose(job_id: str) -> str:
+    """Diagnose why a completed or failed job ended the way it did.
+
+    Queries sacct for exit state and resource usage, reads the last 50 lines
+    of stderr, and pattern-matches common failure signatures (OOM, timeout,
+    node failure, CUDA OOM, missing modules, etc.) to produce an actionable
+    diagnosis with fix suggestions.
+
+    Args:
+        job_id: The SLURM job ID to diagnose.
+    """
+    import math
+    import re
+    import shlex
+
+    config = _load_cfg()
+
+    # --- Query sacct ---
+    sacct_fmt = (
+        "JobID,State,ExitCode,MaxRSS,MaxVMSize,Elapsed,Timelimit,"
+        "NodeList,Reason,ReqMem,AllocCPUS,AllocTRES%60"
+    )
+    try:
+        result = run_ssh(
+            config,
+            ["sacct", "-j", str(job_id), f"--format={sacct_fmt}", "--parsable2", "--noheader"],
+            capture_output=True,
+        )
+    except SSHError as exc:
+        return json.dumps({"error": f"Failed to query sacct for job {job_id}: {exc}"})
+
+    sacct = None
+    for line in result.stdout.strip().splitlines():
+        fields = line.strip().split("|")
+        if len(fields) < 12:
+            continue
+        if "." in fields[0].strip():
+            continue
+        sacct = {
+            "job_id": fields[0].strip(),
+            "state": fields[1].strip(),
+            "exit_code": fields[2].strip(),
+            "max_rss_raw": fields[3].strip(),
+            "elapsed": fields[5].strip(),
+            "timelimit": fields[6].strip(),
+            "node": fields[7].strip(),
+            "reason": fields[8].strip(),
+            "req_mem_raw": fields[9].strip(),
+        }
+        break
+
+    if sacct is None:
+        return json.dumps({"error": f"Job {job_id} not found in sacct."})
+
+    # --- Read stderr ---
+    stderr = ""
+    try:
+        io_paths = get_job_io_paths(config, job_id)
+        if io_paths.stderr:
+            quoted = shlex.quote(io_paths.stderr)
+            r = run_ssh(
+                config,
+                ["bash", "-lc", f"tail -n 50 {quoted} 2>/dev/null"],
+                capture_output=True,
+                check=False,
+            )
+            stderr = r.stdout or ""
+    except SSHError:
+        pass
+
+    state = sacct["state"]
+    exit_code = sacct["exit_code"]
+
+    # Parse peak memory
+    mem_multipliers = {"K": 1 / 1024, "M": 1, "G": 1024, "T": 1024 * 1024}
+    max_rss_mb = None
+    raw = sacct["max_rss_raw"].rstrip("nc")
+    if raw and raw not in ("0", ""):
+        suffix = raw[-1].upper()
+        if suffix in mem_multipliers:
+            try:
+                max_rss_mb = float(raw[:-1]) * mem_multipliers[suffix]
+            except ValueError:
+                pass
+        else:
+            try:
+                max_rss_mb = float(raw)
+            except ValueError:
+                pass
+
+    diag = {
+        "job_id": sacct["job_id"],
+        "state": state,
+        "exit_code": exit_code,
+        "max_rss_mb": round(max_rss_mb, 1) if max_rss_mb else None,
+        "elapsed": sacct["elapsed"],
+        "timelimit": sacct["timelimit"],
+        "node": sacct["node"],
+        "diagnosis": "Unknown failure",
+        "root_cause": None,
+        "suggestion": None,
+        "fix_command": None,
+    }
+
+    # --- Pattern matching ---
+    if state == "COMPLETED" and exit_code == "0:0":
+        diag["diagnosis"] = "Job completed successfully"
+        diag["root_cause"] = "No failure detected"
+        diag["suggestion"] = "No action needed."
+    elif state == "OUT_OF_MEMORY" or exit_code == "0:137":
+        diag["diagnosis"] = "Out of Memory (OOM killed)"
+        diag["root_cause"] = "Job exceeded allocated RAM"
+        if max_rss_mb and max_rss_mb > 0:
+            suggested_mb = max_rss_mb * 1.3
+            if suggested_mb >= 1024:
+                diag["suggestion"] = f"Peak RSS was {max_rss_mb:.0f}M. Request at least {suggested_mb / 1024:.1f}G."
+                diag["fix_command"] = f"--mem={math.ceil(suggested_mb / 1024)}G"
+            else:
+                diag["suggestion"] = f"Peak RSS was {max_rss_mb:.0f}M. Request at least {suggested_mb:.0f}M."
+                diag["fix_command"] = f"--mem={math.ceil(suggested_mb)}M"
+        else:
+            diag["suggestion"] = "Increase --mem."
+    elif state == "TIMEOUT":
+        diag["diagnosis"] = "Walltime exceeded"
+        diag["root_cause"] = "Job did not finish within the allocated time limit"
+        diag["suggestion"] = f"Elapsed {sacct['elapsed']} hit limit {sacct['timelimit']}. Use --chain or increase --time."
+        diag["fix_command"] = "koa submit --chain"
+    elif state == "NODE_FAIL":
+        node = sacct["node"]
+        diag["diagnosis"] = "Node failure"
+        diag["root_cause"] = f"Node {node} failed during execution"
+        diag["suggestion"] = f"Exclude faulty node and resubmit."
+        diag["fix_command"] = f"koa resubmit {sacct['job_id']} -- --exclude={node}"
+    elif "CANCELLED" in state:
+        diag["diagnosis"] = "Job was cancelled"
+        diag["root_cause"] = f"State: {state}, reason: {sacct.get('reason', 'unknown')}"
+        diag["suggestion"] = "Check if cancellation was intentional."
+        diag["fix_command"] = f"koa resubmit {sacct['job_id']}"
+    elif stderr and ("CUDA out of memory" in stderr or ("out of memory" in stderr.lower() and "cuda" in stderr.lower())):
+        diag["diagnosis"] = "GPU VRAM exhausted"
+        diag["root_cause"] = "Model or batch does not fit in GPU memory"
+        diag["suggestion"] = "Reduce batch size, enable gradient checkpointing, use mixed precision, or request a GPU with more VRAM."
+    elif stderr and "NCCL" in stderr and ("error" in stderr.lower() or "warn" in stderr.lower()):
+        diag["diagnosis"] = "NCCL communication error"
+        diag["root_cause"] = "Distributed training communication failure"
+        diag["suggestion"] = "Set NCCL_DEBUG=INFO. Try NCCL_IB_DISABLE=1 and NCCL_P2P_DISABLE=1."
+    elif stderr:
+        mod_match = re.search(r"ModuleNotFoundError:\s*No module named '([^']+)'", stderr)
+        path_match = re.search(r"No such file or directory:\s*['\"]?([^'\"\\n]+)", stderr)
+        perm_match = re.search(r"Permission denied", stderr, re.IGNORECASE)
+        if mod_match:
+            module = mod_match.group(1)
+            diag["diagnosis"] = f"Missing module: {module}"
+            diag["root_cause"] = f"Module '{module}' not installed"
+            diag["suggestion"] = f"pip install {module}"
+            diag["fix_command"] = f"pip install {module}"
+        elif path_match:
+            missing = path_match.group(1).strip()
+            diag["diagnosis"] = f"Missing file: {missing}"
+            diag["root_cause"] = f"Path does not exist: {missing}"
+            diag["suggestion"] = "Verify data was staged before submission."
+        elif perm_match:
+            diag["diagnosis"] = "Permission denied"
+            diag["root_cause"] = "Insufficient filesystem permissions"
+            diag["suggestion"] = "Check file permissions on the target path."
+        elif "FAILED" in state:
+            last_lines = [l.strip() for l in stderr.strip().splitlines() if l.strip()]
+            diag["diagnosis"] = f"Job failed with exit code {exit_code}"
+            diag["root_cause"] = last_lines[-1][:200] if last_lines else "Unknown"
+            diag["suggestion"] = "Check the full stderr log."
+    elif "FAILED" in state:
+        diag["diagnosis"] = f"Job failed with exit code {exit_code}"
+        diag["root_cause"] = "Non-zero exit code"
+        diag["suggestion"] = "Check the job's stderr log."
+
+    return json.dumps(diag, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Tool: koa_validate
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def koa_validate(
+    script_path: str,
+    partition: Optional[str] = None,
+    gpus: Optional[int] = None,
+) -> str:
+    """Pre-flight validation of a SLURM job script.
+
+    Parses #SBATCH directives, queries the cluster for partition/GPU/QOS info,
+    and checks for common misconfigurations (wrong partition, GPU type, count,
+    memory, walltime, missing GPU code, output path issues).
+
+    Args:
+        script_path: Local path to the job script to validate.
+        partition: Override partition to validate against (optional).
+        gpus: Override GPU count for validation (optional).
+    """
+    from pathlib import Path
+    from .commands.validate import run_checks, _parse_sbatch_directives
+
+    config = _load_cfg()
+    p = Path(script_path)
+    if not p.exists():
+        return json.dumps({"error": f"Script not found: {script_path}"})
+
+    script_text = p.read_text(encoding="utf-8")
+    directives = _parse_sbatch_directives(script_text)
+    results = run_checks(
+        script_text,
+        directives,
+        config,
+        partition_override=partition,
+        gpus_override=gpus,
+    )
+    return json.dumps({"checks": results}, indent=2)
+
+
+
+# ---------------------------------------------------------------------------
+# Tool: koa_env_freeze
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def koa_env_freeze() -> str:
+    """Freeze the local Python environment to a YAML lockfile.
+
+    Detects environment type (pip/conda), captures all installed packages,
+    Python version, CUDA version, OS info, and relevant environment variables.
+    Writes the result to koa-env.lock.yaml in the current directory.
+    """
+    from .commands.env import (
+        _detect_env_type,
+        _get_cuda_version,
+        _get_env_vars,
+        _get_local_packages,
+    )
+    import platform
+    from datetime import datetime, timezone
+    from pathlib import Path
+    import yaml
+
+    env_type = _detect_env_type()
+    packages = _get_local_packages(env_type)
+    python_version = platform.python_version()
+    cuda_version = _get_cuda_version()
+    env_vars = _get_env_vars()
+
+    lockfile = {
+        "frozen_at": datetime.now(timezone.utc).isoformat(),
+        "python_version": python_version,
+        "cuda_version": cuda_version or "not detected",
+        "os": platform.platform(),
+        "env_type": env_type,
+        "packages": packages,
+    }
+    if env_vars:
+        lockfile["env_vars"] = env_vars
+
+    output_path = Path("koa-env.lock.yaml")
+    output_path.write_text(yaml.safe_dump(lockfile, sort_keys=False), encoding="utf-8")
+
+    return json.dumps({
+        "status": "frozen",
+        "env_type": env_type,
+        "python_version": python_version,
+        "cuda_version": cuda_version or "not detected",
+        "package_count": len(packages),
+        "output_file": str(output_path),
+    }, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Tool: koa_env_diff
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def koa_env_diff() -> str:
+    """Compare the local koa-env.lock.yaml lockfile against the remote cluster environment.
+
+    Reads the local lockfile and runs pip freeze on the remote cluster,
+    then reports matching, mismatched, local-only, and remote-only packages.
+    """
+    from pathlib import Path
+    import yaml
+    from .commands.env import _parse_package_name_version, _remote_pip_freeze
+
+    lockfile_path = Path("koa-env.lock.yaml")
+    if not lockfile_path.exists():
+        return json.dumps({"error": "No koa-env.lock.yaml found. Run koa_env_freeze first."})
+
+    lock = yaml.safe_load(lockfile_path.read_text(encoding="utf-8")) or {}
+    local_packages = lock.get("packages", [])
+    local_map = dict(_parse_package_name_version(p) for p in local_packages)
+
+    config = _load_cfg()
+    remote_pkgs = _remote_pip_freeze(config)
+    remote_map = dict(_parse_package_name_version(p) for p in remote_pkgs)
+
+    all_names = sorted(set(local_map) | set(remote_map))
+    rows = []
+    n_match = n_mismatch = n_added = n_removed = 0
+
+    for name in all_names:
+        local_ver = local_map.get(name)
+        remote_ver = remote_map.get(name)
+        if local_ver is not None and remote_ver is not None:
+            if local_ver == remote_ver:
+                status = "match"
+                n_match += 1
+            else:
+                status = "mismatch"
+                n_mismatch += 1
+        elif local_ver is not None:
+            status = "local_only"
+            n_added += 1
+        else:
+            status = "remote_only"
+            n_removed += 1
+        rows.append({
+            "package": name,
+            "local": local_ver or "",
+            "remote": remote_ver or "",
+            "status": status,
+        })
+
+    return json.dumps({
+        "packages": rows,
+        "summary": {
+            "matching": n_match,
+            "mismatched": n_mismatch,
+            "local_only": n_added,
+            "remote_only": n_removed,
+            "total": len(all_names),
+        },
+    }, indent=2)
+
+# ---------------------------------------------------------------------------
+# Tool: koa_anywhere
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def koa_anywhere(script_path: str, time: str = "04:00:00") -> str:
+    """Compare estimated start times across all configured backends.
+
+    Probes every backend in the global config via sbatch --test-only and
+    returns a ranked comparison so the agent can recommend the fastest cluster.
+
+    Args:
+        script_path: Path to the job script (remote path on each cluster).
+        time: Walltime to simulate (default: 04:00:00).
+    """
+    from .commands.anywhere import _run_anywhere
+
+    results, recommendation = _run_anywhere(
+        script_path, time, config_path=None, output_format="json",
+    )
+
+    json_results = []
+    for entry in results:
+        out = dict(entry)
+        out.pop("start_dt", None)
+        json_results.append(out)
+
+    return json.dumps({
+        "backends": json_results,
+        "recommendation": recommendation["backend"] if recommendation else None,
+    }, indent=2, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Tool: koa_budget
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def koa_budget(days: int = 30) -> str:
+    """Track GPU-hours consumption, burn rate, waste, and projected allocation exhaustion.
+
+    Queries sacct for GPU-hour usage over the given period and sacctmgr for
+    allocation limits. Returns a breakdown by job state and partition, daily
+    burn rate, and projected exhaustion date if an allocation cap exists.
+
+    Args:
+        days: Lookback period in days (default: 30).
+    """
+    from datetime import datetime, timedelta
+
+    config = _load_cfg()
+    days = max(1, days)
+
+    # 1. Query sacct for GPU-hours
+    sacct_cmd = (
+        f"sacct -u {config.user} "
+        f"--format=JobID,JobName%30,Partition,State%20,Elapsed,AllocTRES%60,Start,End "
+        f"-P -n "
+        f"--starttime=$(date -d '{days} days ago' +%Y-%m-%d 2>/dev/null || date -v-{days}d +%Y-%m-%d)"
+    )
+
+    try:
+        result = run_ssh(config, ["bash", "-lc", sacct_cmd], capture_output=True)
+    except SSHError as exc:
+        return json.dumps({"error": f"Failed to query sacct: {exc}"})
+
+    lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+    if not lines:
+        return json.dumps({"period_days": days, "total_gpu_hours": 0, "jobs": [], "message": "No jobs found."})
+
+    # 2. Parse jobs
+    jobs: list[dict] = []
+    total_gpu_hours = 0.0
+    by_state: dict[str, float] = {}
+    by_partition: dict[str, float] = {}
+
+    def _parse_time(t: str) -> Optional[float]:
+        if not t or t in ("", "UNLIMITED", "Partition_Limit"):
+            return None
+        t = t.strip()
+        d = 0
+        if "-" in t:
+            dp, t = t.split("-", 1)
+            try:
+                d = int(dp)
+            except ValueError:
+                return None
+        parts = t.split(":")
+        try:
+            if len(parts) == 3:
+                h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
+            elif len(parts) == 2:
+                h, m, s = 0, int(parts[0]), float(parts[1])
+            elif len(parts) == 1:
+                h, m, s = 0, 0, float(parts[0])
+            else:
+                return None
+        except ValueError:
+            return None
+        return d * 86400 + h * 3600 + m * 60 + s
+
+    def _gpu_count(tres: str) -> int:
+        for entry in tres.split(","):
+            entry = entry.strip()
+            if entry.startswith("gres/gpu="):
+                try:
+                    return int(entry.split("=")[1])
+                except (ValueError, IndexError):
+                    pass
+        return 0
+
+    def _state_bucket(s: str) -> str:
+        s = s.upper()
+        if "COMPLETED" in s:
+            return "COMPLETED"
+        if "FAIL" in s or "TIMEOUT" in s:
+            return "FAILED"
+        if "CANCEL" in s:
+            return "CANCELLED"
+        if "RUNNING" in s:
+            return "RUNNING"
+        return "OTHER"
+
+    for line in lines:
+        fields = line.split("|")
+        if len(fields) < 8:
+            continue
+        job_id = fields[0].strip()
+        if "." in job_id:
+            continue
+        job_name = fields[1].strip()
+        partition = fields[2].strip()
+        state_raw = fields[3].strip()
+        elapsed_raw = fields[4].strip()
+        tres_raw = fields[5].strip()
+        start_raw = fields[6].strip()
+        end_raw = fields[7].strip()
+
+        elapsed_s = _parse_time(elapsed_raw)
+        if elapsed_s is None or elapsed_s <= 0:
+            continue
+        gpus = _gpu_count(tres_raw)
+        if gpus <= 0:
+            continue
+
+        gpu_hours = (elapsed_s * gpus) / 3600.0
+        bucket = _state_bucket(state_raw)
+
+        total_gpu_hours += gpu_hours
+        by_state[bucket] = by_state.get(bucket, 0.0) + gpu_hours
+        by_partition[partition] = by_partition.get(partition, 0.0) + gpu_hours
+
+        jobs.append({
+            "job_id": job_id,
+            "job_name": job_name,
+            "partition": partition,
+            "state": bucket,
+            "gpu_count": gpus,
+            "gpu_hours": round(gpu_hours, 2),
+            "start": start_raw,
+            "end": end_raw,
+        })
+
+    if not jobs:
+        return json.dumps({"period_days": days, "total_gpu_hours": 0, "jobs": [], "message": "No GPU jobs found."})
+
+    # 3. Query allocation limit
+    allocation_limit: Optional[float] = None
+    try:
+        assoc_result = run_ssh(
+            config,
+            ["bash", "-lc",
+             f"sacctmgr show assoc user={config.user} format=Account,GrpTRESMins --parsable2 --noheader"],
+            capture_output=True,
+        )
+        for aline in assoc_result.stdout.strip().splitlines():
+            aline = aline.strip()
+            if not aline:
+                continue
+            parts = [p.strip() for p in aline.split("|")]
+            if len(parts) >= 2:
+                for entry in parts[1].split(","):
+                    entry = entry.strip()
+                    if "gpu" in entry.lower() and "=" in entry:
+                        try:
+                            mins = float(entry.split("=")[1])
+                            limit_h = mins / 60.0
+                            if allocation_limit is None or limit_h > allocation_limit:
+                                allocation_limit = limit_h
+                        except (ValueError, IndexError):
+                            pass
+    except SSHError:
+        pass
+
+    # 4. Compute metrics
+    burn_rate = total_gpu_hours / days
+    wasted = by_state.get("FAILED", 0.0) + by_state.get("CANCELLED", 0.0)
+
+    projected_exhaustion: Optional[str] = None
+    days_remaining: Optional[float] = None
+    if allocation_limit is not None and burn_rate > 0:
+        remaining = allocation_limit - total_gpu_hours
+        if remaining > 0:
+            days_remaining = remaining / burn_rate
+            projected_exhaustion = (datetime.now() + timedelta(days=days_remaining)).strftime("%Y-%m-%d")
+        else:
+            days_remaining = 0.0
+            projected_exhaustion = "EXHAUSTED"
+
+    return json.dumps({
+        "period_days": days,
+        "total_gpu_hours": round(total_gpu_hours, 2),
+        "by_state": {k: round(v, 2) for k, v in sorted(by_state.items())},
+        "by_partition": {k: round(v, 2) for k, v in sorted(by_partition.items())},
+        "burn_rate_per_day": round(burn_rate, 2),
+        "wasted_gpu_hours": round(wasted, 2),
+        "allocation_limit": round(allocation_limit, 2) if allocation_limit is not None else None,
+        "projected_exhaustion": projected_exhaustion,
+        "days_remaining": round(days_remaining, 1) if days_remaining is not None else None,
+        "jobs": jobs,
+    }, indent=2, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Tool: koa_distributed_show
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def koa_distributed_show(
+    script_path: str,
+    nodes: int = 2,
+    gpus_per_node: int = 1,
+) -> str:
+    """Show the distributed training configuration that would be injected for a script.
+
+    Auto-detects the framework (PyTorch, DeepSpeed, Horovod) and returns the
+    environment variables, sbatch flags, and launcher command that
+    ``koa submit --distributed`` would inject.
+
+    Args:
+        script_path: Path to the training script (local).
+        nodes: Number of nodes (default: 2).
+        gpus_per_node: GPUs per node (default: 1).
+    """
+    from pathlib import Path as _Path
+    from .commands.distributed import build_distributed_config
+
+    script = _Path(script_path).expanduser()
+    if not script.exists():
+        return json.dumps({"error": f"Script not found: {script_path}"})
+
+    cfg = build_distributed_config(
+        script,
+        nodes=nodes,
+        gpus_per_node=gpus_per_node,
+    )
+    return json.dumps(cfg, indent=2)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

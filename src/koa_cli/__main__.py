@@ -47,6 +47,8 @@ from .runs import list_runs, record_submission, show_run, sync_statuses
 from .commands import optimize as cmd_optimize
 from .commands import audit as cmd_audit
 from .commands import why as cmd_why
+from .commands import diagnose as cmd_diagnose
+from .commands import validate as cmd_validate
 from .commands import limits as cmd_limits
 from .commands import spy as cmd_spy
 from .commands import priority as cmd_priority
@@ -56,7 +58,13 @@ from .commands import notify as cmd_notify
 from .commands import sweep as cmd_sweep
 from .commands import watch as cmd_watch
 from .commands import chain as cmd_chain
+from .commands import anywhere as cmd_anywhere
+from .commands import env as cmd_env
 from .commands.chain import register_chain_args, handle_chain_submit, display_chain_result, chain_to_json
+from .commands.anywhere import register_anywhere_args, handle_anywhere_submit
+from .commands import distributed as cmd_distributed
+from .commands.distributed import register_distributed_args, handle_distributed_submit
+from .commands import budget as cmd_budget
 
 DEFAULT_SNAPSHOT_EXCLUDES: list[str] = [
     ".git/",
@@ -438,6 +446,8 @@ def _build_parser() -> argparse.ArgumentParser:
     cmd_optimize.register_parser(subparsers)
     cmd_audit.register_parser(subparsers)
     cmd_why.register_parser(subparsers)
+    cmd_diagnose.register_parser(subparsers)
+    cmd_validate.register_parser(subparsers)
 
     # --- Intelligence commands ---
     cmd_limits.register_parser(subparsers)
@@ -451,9 +461,19 @@ def _build_parser() -> argparse.ArgumentParser:
     cmd_sweep.register_parser(subparsers)
     cmd_watch.register_parser(subparsers)
     cmd_chain.register_parser(subparsers)
+    cmd_distributed.register_parser(subparsers)
+    cmd_anywhere.register_parser(subparsers)
+    cmd_env.register_parser(subparsers)
+    cmd_budget.register_parser(subparsers)
 
     # --- Add chain/off-peak flags to submit parser ---
     register_chain_args(submit_parser)
+
+    # --- Add --distributed flags to submit parser ---
+    register_distributed_args(submit_parser)
+
+    # --- Add --anywhere flag to submit parser ---
+    register_anywhere_args(submit_parser)
 
     return parser
 
@@ -901,6 +921,17 @@ def _create_repo_snapshot(source: Path, destination: Path, extra_excludes: Optio
     shutil.copytree(source, destination, ignore=_snapshot_ignore(source, patterns))
 
 def _submit(args: argparse.Namespace, config: Config) -> int:
+    # --- Anywhere mode: probe all backends and submit to the fastest ---
+    if getattr(args, "anywhere", False):
+        return handle_anywhere_submit(args, config_path=getattr(args, "config", None))
+
+    # Pre-submit validation: warn (but don't block) on common issues.
+    try:
+        from .commands.validate import validate_before_submit
+        validate_before_submit(Path(args.job_script), config)
+    except Exception:
+        pass  # Validation is advisory; never block submission.
+
     script_sbatch_args = _sbatch_args_from_script(Path(args.job_script))
 
     sbatch_args: list[str] = []
@@ -1027,6 +1058,13 @@ def _submit(args: argparse.Namespace, config: Config) -> int:
             (local_job_dir / "results").mkdir(exist_ok=True)
             shutil.copytree(manifest_path, local_job_dir / "run_metadata")
             shutil.copytree(repo_snapshot_path, local_job_dir / "repo")
+
+    # --- Distributed mode: inject multi-node flags ---
+    if getattr(args, "distributed", False):
+        sbatch_args = handle_distributed_submit(
+            args, config, sbatch_args,
+            str(config.remote_code_dir / args.job_script.name),
+        )
 
     # --- Chain mode: submit N linked jobs instead of one ---
     if getattr(args, "chain", None):
@@ -1270,6 +1308,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             return cmd_audit.handle(args, config)
         if args.command == "why":
             return cmd_why.handle(args, config)
+        if args.command == "diagnose":
+            return cmd_diagnose.handle(args, config)
+        if args.command == "validate":
+            return cmd_validate.handle(args, config)
         if args.command == "limits":
             return cmd_limits.handle(args, config)
         if args.command == "spy":
@@ -1288,6 +1330,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             return cmd_watch.handle(args, config)
         if args.command == "chain":
             return cmd_chain.handle(args, config)
+        if args.command == "distributed":
+            return cmd_distributed.handle(args, config)
+        if args.command == "anywhere":
+            return cmd_anywhere.handle(args, config)
+        if args.command == "env":
+            return cmd_env.handle(args, config)
+        if args.command == "budget":
+            return cmd_budget.handle(args, config)
     except (SSHError, FileNotFoundError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
