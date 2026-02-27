@@ -286,7 +286,11 @@ def format_availability_table(
         sum_table.add_column("GPUs", justify="right")
         sum_table.add_column("Offline", style="red", justify="right")
 
-        for gpu_type in sorted(summary, key=lambda g: (pending.get(g, 0), g)):
+        def _contention(g: str) -> float:
+            total = summary[g].get("available", 1) or 1
+            return pending.get(g, 0) / total
+
+        for gpu_type in sorted(summary, key=lambda g: (_contention(g), g)):
             s = summary[gpu_type]
             available = s.get("available", 0)
             offline = s.get("offline", 0)

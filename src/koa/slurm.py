@@ -370,14 +370,15 @@ def select_best_gpu(
     queue_aware: bool = True,
     min_gpus: int = 1,
 ) -> str:
-    """Select the best available GPU, balancing compute power and queue depth.
+    """Select the GPU that will be quickest to allocate, then strongest.
 
-    When queue_aware is True (default), each GPU type is scored as:
-        score = priority / (1 + pending_jobs)
+    Scores by contention ratio: pending_jobs / total_gpus.
+    Lower contention = faster allocation.  Among equal contention,
+    the strongest chip (highest GPU_PRIORITY) wins.
 
-    This means an H100 (priority 100) with 1 pending job scores 50,
-    beating an RTX 2070 (priority 25) with no queue. But an RTX 2080 Ti
-    (priority 35) with no queue beats an A30 (priority 75) with 4 pending.
+    Example: H200 (4 GPUs, 0 pending) beats H100 (1 GPU, 2 pending)
+    because contention is 0.0 vs 2.0.  Among two zero-queue types,
+    H200 beats RTX2080Ti because it has higher priority.
 
     When min_gpus > 1, GPU types that have fewer than min_gpus per node
     are filtered out (can't satisfy the request on a single node).
@@ -405,10 +406,13 @@ def select_best_gpu(
     pending = get_pending_gpu_counts(config, partition)
 
     def _score(g: str) -> tuple:
-        # Sort by: zero queue first, then strongest chip
+        # Contention = pending / total_gpus (lower = faster to get)
+        total = available.get(g, 1)
         pend = pending.get(g, 0)
+        contention = pend / total
         priority = GPU_PRIORITY.get(g, 0)
-        return (pend == 0, priority)
+        # Maximize: (-contention, priority)
+        return (-contention, priority)
 
     return max(available, key=_score)
 
