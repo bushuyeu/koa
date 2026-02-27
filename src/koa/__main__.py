@@ -246,7 +246,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="koa",
         description="Utilities for running KOA HPC (Slurm) jobs from your local machine.",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
 
     setup_parser = subparsers.add_parser(
         "setup", help="Configure global KOA defaults (user, workspace roots, CUDA version)."
@@ -1272,6 +1272,10 @@ def _runs_show(args: argparse.Namespace, config: Config) -> int:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    if not hasattr(args, "command") or args.command is None:
+        parser.print_help()
+        return 0
 
     if args.command == "setup":
         return _setup(args)
