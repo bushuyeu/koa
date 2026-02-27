@@ -7,11 +7,16 @@ A lightweight command-line companion for the University of Hawai'i KOA cluster. 
 ## Highlights
 - **Job submission pipeline** – copy a script, infer sensible defaults, and hand it to `sbatch` with a single command.
 - **Auto GPU selection** – automatically detects the best available GPU type on the target partition and injects the right `--gres` flag (ranked H200 > H100 > A100 > A40 > L40 > A30 > V100 > RTX2080Ti).
+- **Scheduling optimizer** – dry-run `sbatch --test-only` across every GPU type and partition to find the fastest start time (`koa optimize`).
+- **Job auditing** – analyze historical resource usage via `sacct` and right-size future requests (`koa audit`).
+- **Job chaining** – split long training runs into auto-dependent segments with `koa submit --chain N`.
+- **Queue intelligence** – pending-reason decoder (`koa why`), queue depth and wait-time estimates (`koa spy`), fair-share score tracker (`koa priority`).
+- **Live efficiency** – detect idle GPUs on running jobs via `nvidia-smi` over SSH (`koa efficiency`).
+- **Automation** – one-click resubmit from manifest, parameter sweeps via job arrays, GPU availability watch, Slack/Discord webhook alerts.
 - **Cluster queue view** – see the full cluster queue with your own jobs highlighted in bold, others dimmed, all in a Rich-formatted table.
 - **GPU availability** – real-time GPU/node inventory color-coded by state (green=idle, yellow=mixed, red=down) with a summary of GPU counts by type.
+- **AI agent integration** – MCP server (`koa-mcp`), Claude Code slash commands, and `--format json` on all commands for machine-readable output.
 - **Workspace snapshots** – every submission bundles the exact repo state so jobs run with reproducible code and configs.
-- **Run manifests** – each submission stores git state and relevant untracked files alongside the job results for reproducibility.
-- **Global setup** – one-time `koa setup` captures usernames, workspace roots, and a default CUDA Toolkit version for each backend.
 - **Run catalog** – every submission is indexed locally so you can list, sync, and inspect historical runs.
 - **Plain Python package** – small dependency footprint and no bundled training/evaluation code.
 
@@ -147,33 +152,49 @@ koa init
 # 1. Check connectivity and cluster health
 koa check
 
-# 2. Submit a job script
-#    Auto GPU selection picks the best available GPU automatically
+# 2. Find the optimal GPU config before submitting
+koa optimize scripts/basic_job.slurm --time 04:00:00
+# Tests all GPU types × partitions, shows estimated start times
+
+# 3. Submit a job script
 koa submit scripts/basic_job.slurm --time 01:00:00 --desc "baseline"
 # Auto-selected GPU: h100 x1
 # Submitted KOA job 123456
 
-# disable auto GPU selection if you want manual control
-koa submit scripts/basic_job.slurm --no-auto-gpu --gpus 2
-# or specify an explicit GRES
-koa submit scripts/basic_job.slurm --no-auto-gpu --sbatch-arg "--gres=gpu:a100:4"
+# Submit a long training run as chained 4-hour segments
+koa submit scripts/train.slurm --chain 5 --chain-time 04:00:00
 
-# every submission writes a repo snapshot + run metadata under <local results>/<job-id>/
-  # run_metadata/ includes env_hashes.json for watched setup files
-# forward local env into the job (NAME pulls from your shell; NAME=val sets explicitly)
-MODEL_NAME=qwen3-vl-4b-instruct koa submit scripts/basic_job.slurm --env MODEL_NAME
-koa submit scripts/basic_job.slurm --env MODEL_NAME=qwen3-vl-4b-instruct --env DATA_ROOT=/data/run123
+# Parameter sweep over a grid
+koa sweep scripts/hparam_search.slurm --params sweep_config.json
 
-# 3. Monitor jobs and inspect runs
-koa jobs               # your jobs in a Rich-formatted table
-koa queue              # full cluster queue (your jobs highlighted)
-koa queue -p sandbox   # filter to a specific partition
-koa availability       # GPU/node inventory across the cluster
-koa availability -p kill-shared  # filter to a specific partition
-koa cancel <job-id>
+# 4. Monitor jobs
+koa jobs                        # your active jobs
+koa queue -p sandbox            # full cluster queue
+koa availability                # GPU/node inventory
+koa why <job-id>                # explain why a job is pending
+koa efficiency <job-id>         # live GPU utilization
+koa efficiency <job-id> --watch 30  # refresh every 30s
+
+# 5. Queue intelligence
+koa spy                         # queue depth, next GPUs freeing, wait history
+koa priority                    # your fair-share score and ranking
+koa limits                      # QOS quotas and account associations
+
+# 6. Audit and optimize future jobs
+koa audit --days 14             # right-sizing advice from recent history
+
+# 7. Automation
+koa resubmit <job-id>           # replay a previous submission
+koa notify setup --slack-url https://hooks.slack.com/...  # configure alerts
+koa notify start --all          # start background job-state alerting
+koa watch --gpu-type h100       # alert when H100s become available
+
+# 8. Run management
 koa logs <job-id> --follow
+koa cancel <job-id>
 koa runs list
-koa dashboard  # launches the Streamlit view
+koa runs sync
+koa dashboard
 ```
 
 Every submitted job includes a `run_metadata/` folder under its results directory containing `manifest.json`, `git_head.txt`, `git_status.txt`, `env_hashes.json`, and any untracked files that were present locally when you launched the run.
@@ -181,6 +202,8 @@ Every submitted job includes a `run_metadata/` folder under its results director
 ---
 
 ## CLI reference
+
+### Core commands
 
 - `check` – run a quick SSH round-trip and display `sinfo` output.
 - `setup` – configure global defaults (user, workspace roots, default CUDA Toolkit version).
@@ -192,6 +215,7 @@ Every submitted job includes a `run_metadata/` folder under its results director
 - `submit` – copy a script and call `sbatch`; use `--sbatch-arg` for raw overrides. Add flags like `--gpus` (generic count), `--constraint hopper`, or `--desc` to control resources and the timestamped results folder name. Forward env vars with `--env NAME` or `--env NAME=value`, and set defaults in `env_pass` within `koa-config.yaml`.
   - **Auto GPU selection** is enabled by default. The CLI queries `sinfo` for idle/mix nodes on the target partition, ranks available GPU types by priority (H200 > H100 > A100 > A40 > L40 > A30 > V100 > RTX2080Ti), and injects the appropriate `--gres=gpu:<type>:<count>` flag. The GPU count is read from `#SBATCH --gres=gpu:N` in your script (defaults to 1).
   - Pass `--no-auto-gpu` to disable this behavior, or use `--gpus` / `--gres` to override manually.
+  - **`--chain N`** – split the job into N dependent segments. Each segment runs for `--chain-time` (default: 4h) and automatically continues the next with `--dependency=afterok`. Jobs receive `SLURM_CHAIN_LINK` and `SLURM_CHAIN_TOTAL` environment variables. Add `--off-peak` to schedule the first segment at 23:00.
 - `cancel` – stop a job by ID with `scancel`.
 - `logs` – stream or inspect a job's stdout/stderr in real time via `tail` (stored at `<remote results dir>/<job-id>/job.log` and `job.err`).
 - `runs` – sync and inspect the local catalog of submitted jobs.
@@ -199,7 +223,30 @@ Every submitted job includes a `run_metadata/` folder under its results director
   - `koa runs sync` updates Slurm status and downloads completed runs into the local mirror automatically.
   - `koa runs show <job-id>` prints the recorded metadata (git commit, env hashes, locations) for a single run.
 
-Each command accepts `--config /path/to/config.yaml` if you need to swap between multiple KOA accounts, and `--backend <cluster_name>` to target a specific Slurm backend when you have more than one configured.
+### Scheduling commands
+
+- `optimize` – find the fastest GPU configuration by running `sbatch --test-only` across all GPU types and partitions. Shows a ranked table of estimated start times so you can pick the config that gets your job running soonest. Use `--time`, `--partition`, `--gpu-type` to constrain the search space.
+- `audit` – analyze recent job history via `sacct` and identify resource waste. Reports memory, time, and CPU efficiency per job with color-coded ratings, suggests right-sized values (130% of actual peak), and summarizes total wasted compute-hours. Use `--days N` to control the lookback window (default: 7).
+- `why` – explain why a job is pending. Decodes SLURM reason codes (Priority, Resources, QOSMaxJobsPerUser, etc.) into plain-language explanations with actionable advice. Shows queue position and estimated wait context.
+
+### Queue intelligence commands
+
+- `limits` – display your QOS limits, account associations, and fair-share information in three Rich tables. Shows max jobs, max GPUs, max wall time, and current usage against each quota.
+- `spy` – queue intelligence dashboard. Shows queue depth per partition, the next GPUs to free (sorted by end time), historical wait-time statistics (median/avg/min/max), and a partition overview. Use `--partition`/`-p` to focus on a specific partition.
+- `priority` – display your fair-share score, queue ranking, and priority factor breakdown from `sprio` and `sshare`. Includes recovery advice when your fair-share is low. Use `--all` to see all users.
+- `efficiency` – live GPU waste detector. Queries `nvidia-smi` on the compute node via SSH hop and correlates with `sstat` CPU/memory data. Flags GPUs below 20% utilization. Use `--watch N` for continuous monitoring with N-second refresh.
+
+### Automation commands
+
+- `resubmit` – re-run a previous job using its stored manifest. Recovers the exact script path and sbatch arguments from the run catalog. Use `--dry-run` to preview without submitting.
+- `notify` – Slack/Discord webhook alerts for job state changes.
+  - `koa notify setup --slack-url URL` or `--discord-url URL` to configure.
+  - `koa notify start [--job-id ID | --all]` to begin background monitoring.
+  - `koa notify status` to check the monitor process.
+- `sweep` – parameter sweep via SLURM job arrays. Provide a JSON or YAML params file defining the sweep grid; KOA computes the cartesian product, uploads a params mapping, and submits with `--array=0-{N-1}`. The job script reads `KOA_SWEEP_PARAMS_FILE` to look up its combination. Use `--max-concurrent N` to throttle.
+- `watch` – monitor the cluster for GPU availability. Polls `sinfo` for idle nodes matching `--gpu-type` and `--partition`, sends a webhook alert when GPUs appear. Use `--once` for a single check, or let it run continuously with Rich Live display. Use `--interval N` to set poll frequency.
+
+All new commands support `--format json` for machine-readable output, `--config` for alternate config files, and `--backend` for multi-cluster targeting.
 
 ---
 
@@ -316,12 +363,63 @@ Running `koa init` also drops a project-specific `scripts/basic_job.slurm` and `
 
 ---
 
+## AI Agent Integration
+
+KOA is designed to be operated by AI agents as well as humans. Three integration points are provided:
+
+### MCP Server
+
+The `koa-mcp` entry point exposes all commands as [Model Context Protocol](https://modelcontextprotocol.io/) tools, letting AI assistants manage your HPC jobs directly.
+
+Install with MCP support and configure in Claude Code:
+
+```bash
+pip install -e ".[mcp]"
+```
+
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "koa": {
+      "command": "koa-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+Available MCP tools: `koa_cluster_status`, `koa_jobs`, `koa_queue`, `koa_availability`, `koa_cancel`, `koa_logs`, `koa_optimize`, `koa_why`, `koa_audit`, `koa_limits`, `koa_spy`, `koa_priority`, `koa_efficiency`, `koa_watch_once`, `koa_submit`, `koa_resubmit`, and more.
+
+### Claude Code Slash Commands
+
+Pre-built workflows in `.claude/commands/`:
+
+- `/koa-submit <script>` – find optimal config, submit, report result
+- `/koa-monitor` – comprehensive status report with recommendations
+- `/koa-audit` – efficiency analysis with right-sizing suggestions
+- `/koa-optimize <script> [flags]` – test scheduling across GPU configurations
+- `/koa-status` – cluster and job status summary
+
+### JSON Output
+
+All commands support `--format json` for structured, machine-parseable output:
+
+```bash
+koa jobs --format json
+koa spy --format json
+koa optimize scripts/train.slurm --format json
+```
+
+---
+
 ## Development
 
 Install development tooling with:
 
 ```bash
-pip install -e .[dev]
+pip install -e ".[dev]"
 ruff check
 pytest
 ```

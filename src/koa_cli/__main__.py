@@ -44,6 +44,19 @@ from .ssh import (
 )
 from .manifest import update_manifest_metadata, write_run_manifest
 from .runs import list_runs, record_submission, show_run, sync_statuses
+from .commands import optimize as cmd_optimize
+from .commands import audit as cmd_audit
+from .commands import why as cmd_why
+from .commands import limits as cmd_limits
+from .commands import spy as cmd_spy
+from .commands import priority as cmd_priority
+from .commands import efficiency as cmd_efficiency
+from .commands import resubmit as cmd_resubmit
+from .commands import notify as cmd_notify
+from .commands import sweep as cmd_sweep
+from .commands import watch as cmd_watch
+from .commands import chain as cmd_chain
+from .commands.chain import register_chain_args, handle_chain_submit, display_chain_result, chain_to_json
 
 DEFAULT_SNAPSHOT_EXCLUDES: list[str] = [
     ".git/",
@@ -420,6 +433,27 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     runs_show = runs_subparsers.add_parser("show", help="Display details for a run.")
     runs_show.add_argument("job_id", help="Job ID to inspect.")
+
+    # --- Scheduling commands (commands/ package) ---
+    cmd_optimize.register_parser(subparsers)
+    cmd_audit.register_parser(subparsers)
+    cmd_why.register_parser(subparsers)
+
+    # --- Intelligence commands ---
+    cmd_limits.register_parser(subparsers)
+    cmd_spy.register_parser(subparsers)
+    cmd_priority.register_parser(subparsers)
+    cmd_efficiency.register_parser(subparsers)
+
+    # --- Automation commands ---
+    cmd_resubmit.register_parser(subparsers)
+    cmd_notify.register_parser(subparsers)
+    cmd_sweep.register_parser(subparsers)
+    cmd_watch.register_parser(subparsers)
+    cmd_chain.register_parser(subparsers)
+
+    # --- Add chain/off-peak flags to submit parser ---
+    register_chain_args(submit_parser)
 
     return parser
 
@@ -994,6 +1028,14 @@ def _submit(args: argparse.Namespace, config: Config) -> int:
             shutil.copytree(manifest_path, local_job_dir / "run_metadata")
             shutil.copytree(repo_snapshot_path, local_job_dir / "repo")
 
+    # --- Chain mode: submit N linked jobs instead of one ---
+    if getattr(args, "chain", None):
+        chain_ids = handle_chain_submit(
+            args, config, sbatch_args, str(config.remote_code_dir / args.job_script.name),
+        )
+        display_chain_result(chain_ids, getattr(args, "off_peak", False), args.chain_time)
+        return 0
+
     job_id = submit_job(
         config,
         args.job_script,
@@ -1222,6 +1264,30 @@ def main(argv: Optional[list[str]] = None) -> int:
                 return _runs_sync(args, config)
             if args.runs_command == "show":
                 return _runs_show(args, config)
+        if args.command == "optimize":
+            return cmd_optimize.handle(args, config)
+        if args.command == "audit":
+            return cmd_audit.handle(args, config)
+        if args.command == "why":
+            return cmd_why.handle(args, config)
+        if args.command == "limits":
+            return cmd_limits.handle(args, config)
+        if args.command == "spy":
+            return cmd_spy.handle(args, config)
+        if args.command == "priority":
+            return cmd_priority.handle(args, config)
+        if args.command == "efficiency":
+            return cmd_efficiency.handle(args, config)
+        if args.command == "resubmit":
+            return cmd_resubmit.handle(args, config)
+        if args.command == "notify":
+            return cmd_notify.handle(args, config)
+        if args.command == "sweep":
+            return cmd_sweep.handle(args, config)
+        if args.command == "watch":
+            return cmd_watch.handle(args, config)
+        if args.command == "chain":
+            return cmd_chain.handle(args, config)
     except (SSHError, FileNotFoundError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
