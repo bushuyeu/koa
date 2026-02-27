@@ -212,6 +212,11 @@ def format_availability_table(raw_output: str, partition: str | None = None) -> 
             summary[gpu_name][bucket] += count
 
         friendly_gres = _friendly_gpu(gres_raw)
+
+        # Skip CPU-only nodes (no GPUs)
+        if gres_raw in ("(null)", "(N/A)", "") or "gpu:" not in gres_raw:
+            continue
+
         table.add_row(node, part, friendly_gres, state, cpus, memory, style=style)
 
     console.print(table)
@@ -221,17 +226,17 @@ def format_availability_table(raw_output: str, partition: str | None = None) -> 
         console.print()
         sum_table = Table(title="GPU Summary", show_lines=False)
         sum_table.add_column("GPU Type", style="bold")
-        sum_table.add_column("Idle", style="green", justify="right")
-        sum_table.add_column("Mixed/Alloc", style="yellow", justify="right")
-        sum_table.add_column("Down/Drain", style="red", justify="right")
+        sum_table.add_column("Free", style="green", justify="right")
+        sum_table.add_column("In Use", style="yellow", justify="right")
+        sum_table.add_column("Offline", style="red", justify="right")
         sum_table.add_column("Total", justify="right")
 
         for gpu_type in sorted(summary, key=lambda g: (-sum(summary[g].values()), g)):
             buckets = summary[gpu_type]
-            idle = buckets.get("idle", 0)
-            mixed = buckets.get("mixed", 0)
-            down = buckets.get("down", 0)
-            total = idle + mixed + down
-            sum_table.add_row(gpu_type, str(idle), str(mixed), str(down), str(total))
+            free = buckets.get("idle", 0)
+            in_use = buckets.get("mixed", 0)
+            offline = buckets.get("down", 0)
+            total = free + in_use + offline
+            sum_table.add_row(gpu_type, str(free), str(in_use), str(offline), str(total))
 
         console.print(sum_table)
