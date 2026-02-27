@@ -265,13 +265,21 @@ def handle(args, config: Config) -> int:
     gpus: int = args.gpus
     conda_env: str | None = args.conda_env
 
-    # 1. Check local port
+    # 1. Find a free local port
     if not _port_is_free(local_port):
+        original_port = local_port
+        for candidate in range(local_port + 1, local_port + 100):
+            if _port_is_free(candidate):
+                local_port = candidate
+                break
+        else:
+            console.print(
+                f"[red]No free port found near {original_port}.[/red]",
+            )
+            return 1
         console.print(
-            f"[red]Port {local_port} is already in use.[/red] "
-            f"Try --port {local_port + 1}",
+            f"Port {original_port} in use, using [bold]{local_port}[/bold] instead."
         )
-        return 1
 
     # 2. Generate token and random remote port
     token = secrets.token_hex(24)
