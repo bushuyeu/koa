@@ -6,7 +6,7 @@ A lightweight command-line companion for the University of Hawai'i KOA cluster. 
 
 ## Highlights
 - **Job submission pipeline** – copy a script, infer sensible defaults, and hand it to `sbatch` with a single command.
-- **Auto GPU selection** – automatically detects the best available GPU type on the target partition and injects the right `--gres` flag (ranked H200 > H100 > A100 > A40 > L40 > A30 > V100 > RTX2080Ti).
+- **Auto GPU selection** – automatically detects the best available GPU type on the target partition and injects the right `--gres` flag (ranked H200 NVL > H100 NVL > H100 PCIe > L40 > A30 > V100 SXM2 > RTX A4000 > RTX 5000 > RTX 2080 Ti > RTX 2070).
 - **Scheduling optimizer** – dry-run `sbatch --test-only` across every GPU type and partition to find the fastest start time (`koa optimize`).
 - **Job auditing** – analyze historical resource usage via `sacct` and right-size future requests (`koa audit`).
 - **Job chaining** – split long training runs into auto-dependent segments with `koa submit --chain N`.
@@ -111,7 +111,7 @@ backends:
     local_root: ~/koa-projects
     default_partition: kill-shared
     default_constraint: hopper
-    default_gres: gpu:a100:1
+    default_gres: gpu:NV-A30:1
     cuda_minor_version: 12.8
 
   - cluster_name: delta
@@ -121,7 +121,7 @@ backends:
     local_root: ~/delta-projects
     default_partition: gpuA100x4  # leave blank if cluster picks a default
     default_constraint: ""        # unset to avoid hopper-only behavior
-    default_gres: gpu:a100:1
+    default_gres: gpu:NV-A30:1
     cuda_minor_version: 12.4
 ```
 
@@ -206,13 +206,14 @@ Every submitted job includes a `run_metadata/` folder under its results director
 - `availability` – show a real-time GPU/node inventory table. Rows are color-coded by state (green=idle, yellow=mixed/allocated, red=down/drained). Includes a summary footer with GPU counts grouped by type and state. Use `--partition`/`-p` to filter.
 - `dashboard` – open the Streamlit dashboard with job history, logs, and GPU node views.
 - `submit` – copy a script and call `sbatch`; use `--sbatch-arg` for raw overrides. Add flags like `--gpus` (generic count), `--constraint hopper`, or `--desc` to control resources and the timestamped results folder name. Forward env vars with `--env NAME` or `--env NAME=value`, and set defaults in `env_pass` within `koa-config.yaml`.
-  - **Auto GPU selection** is enabled by default. The CLI queries `sinfo` for idle/mix nodes on the target partition, ranks available GPU types by priority (H200 > H100 > A100 > A40 > L40 > A30 > V100 > RTX2080Ti), and injects the appropriate `--gres=gpu:<type>:<count>` flag. The GPU count is read from `#SBATCH --gres=gpu:N` in your script (defaults to 1).
+  - **Auto GPU selection** is enabled by default. The CLI queries `sinfo` for idle/mix nodes on the target partition, ranks available GPU types by priority (H200 NVL > H100 NVL > H100 PCIe > L40 > A30 > V100 SXM2 > RTX A4000 > RTX 5000 > RTX 2080 Ti > RTX 2070), and injects the appropriate `--gres=gpu:<type>:<count>` flag. The GPU count is read from `#SBATCH --gres=gpu:N` in your script (defaults to 1).
   - Pass `--no-auto-gpu` to disable this behavior, or use `--gpus` / `--gres` to override manually.
   - **`--chain N`** – split the job into N dependent segments. Each segment runs for `--chain-time` (default: 4h) and automatically continues the next with `--dependency=afterok`. Jobs receive `SLURM_CHAIN_LINK` and `SLURM_CHAIN_TOTAL` environment variables. Add `--off-peak` to schedule the first segment at 23:00.
   - **`--distributed`** – multi-node training helper. Auto-detects framework (PyTorch, DeepSpeed, Horovod), injects `MASTER_ADDR`, `MASTER_PORT`, `WORLD_SIZE`, NCCL env vars, and correct `--nodes`/`--ntasks-per-node` flags. Use `--nodes N`, `--gpus-per-node G`, `--framework` to configure.
   - **`--anywhere`** – cross-cluster smart routing. Probes all configured backends in parallel via `sbatch --test-only`, shows a comparison table of estimated start times, and submits to the fastest cluster.
 - `cancel` – stop a job by ID with `scancel`.
 - `logs` – stream or inspect a job's stdout/stderr in real time via `tail` (stored at `<remote results dir>/<job-id>/job.log` and `job.err`).
+- `jupyter` – launch Jupyter Lab (or Notebook) on a GPU compute node with automatic SSH tunnel. Auto-selects the best GPU, submits a SLURM job, waits for allocation, opens the tunnel, and prints a ready-to-paste URL for VS Code. Ctrl+C cleanly cancels the job and closes the tunnel. Options: `--time`, `--gpus`, `--gpu-type`, `--partition`, `--port`, `--lab`/`--notebook`, `--conda-env`, `--mem`.
 - `runs` – sync and inspect the local catalog of submitted jobs.
   - `koa runs list` shows recent submissions (most recent first).
   - `koa runs sync` updates Slurm status and downloads completed runs into the local mirror automatically.
@@ -267,19 +268,20 @@ When you run `koa submit`, the CLI automatically selects the best available GPU 
 2. Parses the GRES field to identify available GPU types and counts.
 3. Ranks GPUs by priority:
 
-   | Rank | GPU | Priority Score |
-   |------|-----|---------------|
-   | 1 | H200 | 110 |
-   | 2 | H100 | 100 |
-   | 3 | A100 | 90 |
-   | 4 | A40 | 80 |
-   | 5 | L40 | 75 |
-   | 6 | A30 | 70 |
-   | 7 | V100 | 60 |
-   | 8 | RTX A6000 | 55 |
-   | 9 | RTX A5000 | 50 |
-   | 10 | RTX 2080 Ti | 40 |
-   | 11 | T4 | 30 |
+   | Rank | GPU | GRES Name | Priority Score |
+   |------|-----|-----------|---------------|
+   | 1 | H200 NVL | `nvidia_h200_nvl` | 110 |
+   | 2 | H100 NVL | `nvidia_h100_nvl` | 105 |
+   | 3 | H100 PCIe | `nvidia_h100_pcie` / `NV-H100` | 100 |
+   | 4 | L40 | `NV-L40` | 85 |
+   | 5 | A30 | `NV-A30` | 75 |
+   | 6 | A30 MIG 2g | `nvidia_a30_2g.12gb` | 65 |
+   | 7 | V100 SXM2 | `NV-V100-SXM2` | 60 |
+   | 8 | RTX A4000 | `NV-RTX-A4000` | 50 |
+   | 9 | RTX 5000 | `NV-RTX5000` | 45 |
+   | 10 | RTX 2080 Ti | `NV-RTX2080Ti` | 35 |
+   | 11 | RTX 2070 | `NV-RTX2070` | 25 |
+   | 12 | A30 MIG 1g | `nvidia_a30_1g.6gb` | 20 |
 
 4. Injects `--gres=gpu:<best_type>:<count>` into the `sbatch` command.
 
@@ -391,7 +393,7 @@ Configure in `~/.claude/settings.json`:
 }
 ```
 
-Available MCP tools: `koa_cluster_status`, `koa_jobs`, `koa_queue`, `koa_availability`, `koa_cancel`, `koa_logs`, `koa_optimize`, `koa_why`, `koa_audit`, `koa_limits`, `koa_spy`, `koa_priority`, `koa_efficiency`, `koa_watch_once`, `koa_submit`, `koa_resubmit`, and more.
+Available MCP tools: `koa_cluster_status`, `koa_jobs`, `koa_queue`, `koa_availability`, `koa_cancel`, `koa_logs`, `koa_optimize`, `koa_why`, `koa_audit`, `koa_limits`, `koa_spy`, `koa_priority`, `koa_efficiency`, `koa_watch_once`, `koa_submit`, `koa_resubmit`, `koa_jupyter`, and more.
 
 ### Claude Code Slash Commands
 
