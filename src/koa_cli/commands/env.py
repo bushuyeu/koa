@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import secrets
 import shlex
 import subprocess
 import sys
@@ -218,7 +219,7 @@ def _handle_deploy(args, config: Config) -> int:
         tmp.write("\n".join(req_lines) + "\n")
         tmp_path = Path(tmp.name)
 
-    remote_reqs = Path(f"/tmp/koa-reqs-{os.getpid()}.txt")
+    remote_reqs = Path(f"/tmp/koa-reqs-{secrets.token_hex(8)}.txt")
     try:
         copy_to_remote(config, tmp_path, remote_reqs)
     finally:

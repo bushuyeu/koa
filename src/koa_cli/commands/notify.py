@@ -48,6 +48,8 @@ def _save_notify_config(data: dict) -> None:
     NOTIFY_CONFIG_PATH.write_text(
         yaml.safe_dump(data, sort_keys=False), encoding="utf-8"
     )
+    # Restrict permissions -- webhook URLs are sensitive
+    NOTIFY_CONFIG_PATH.chmod(0o600)
 
 
 def _send_webhook(url: str, webhook_type: str, message: str) -> bool:

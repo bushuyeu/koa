@@ -6,6 +6,7 @@ display the user's current limits and usage at a glance.
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 
 from rich.console import Console
@@ -122,7 +123,7 @@ def handle(args, config: Config) -> int:
             config,
             [
                 "sacctmgr", "show", "assoc",
-                f"where user={config.user}",
+                f"where user={shlex.quote(config.user)}",
                 "format=Account,User,QOS,MaxTRESPerUser,MaxJobs,MaxSubmit,GrpTRES",
                 "-P", "-n",
             ],

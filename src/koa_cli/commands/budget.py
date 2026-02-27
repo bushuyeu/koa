@@ -7,6 +7,7 @@ exhaustion so users can pace their GPU spending.
 from __future__ import annotations
 
 import argparse
+import shlex
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -129,14 +130,14 @@ def register_parser(subparsers) -> argparse.ArgumentParser:
 
 
 def handle(args, config: Config) -> int:
-    days = max(1, args.days)
+    days = int(max(1, args.days))
     breakdown = args.breakdown
 
     # ---------------------------------------------------------------
     # 1. Query sacct for GPU-hours
     # ---------------------------------------------------------------
     sacct_cmd = (
-        f"sacct -u {config.user} "
+        f"sacct -u {shlex.quote(config.user)} "
         f"--format=JobID,JobName%30,Partition,State%20,Elapsed,AllocTRES%60,Start,End "
         f"-P -n "
         f"--starttime=$(date -d '{days} days ago' +%Y-%m-%d 2>/dev/null || date -v-{days}d +%Y-%m-%d)"
@@ -219,7 +220,7 @@ def handle(args, config: Config) -> int:
     allocation_limit: Optional[float] = None
     try:
         assoc_cmd = (
-            f"sacctmgr show assoc user={config.user} "
+            f"sacctmgr show assoc user={shlex.quote(config.user)} "
             f"format=Account,GrpTRESMins --parsable2 --noheader"
         )
         assoc_result = run_ssh(

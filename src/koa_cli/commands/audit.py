@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 from typing import Optional
 
 from rich.console import Console
@@ -155,12 +156,12 @@ def register_parser(subparsers) -> argparse.ArgumentParser:
 
 
 def handle(args, config: Config) -> int:
-    days = max(1, args.days)
-    max_jobs = max(1, args.jobs)
+    days = int(max(1, args.days))
+    max_jobs = int(max(1, args.jobs))
 
     # sacct query -- use a date expression compatible with GNU date on the cluster
     sacct_cmd = (
-        f"sacct -u {config.user} "
+        f"sacct -u {shlex.quote(config.user)} "
         f"--format=JobID,JobName%30,MaxRSS,ReqMem,Elapsed,Timelimit,AllocCPUS,TotalCPU,AllocTRES%60,State%20 "
         f"-P -n "
         f"--starttime=$(date -d '{days} days ago' +%Y-%m-%d 2>/dev/null || date -v-{days}d +%Y-%m-%d)"

@@ -66,7 +66,7 @@ def run_ssh(
     )
     if check and result.returncode != 0:
         raise SSHError(
-            f"SSH command failed ({result.returncode}): {' '.join(ssh_command)}\n"
+            f"SSH command failed (exit {result.returncode})\n"
             f"stderr: {result.stderr}"
         )
     return result
@@ -112,7 +112,7 @@ def copy_to_remote(
     )
     if result.returncode != 0:
         raise SSHError(
-            f"rsync upload failed ({result.returncode}): {' '.join(rsync_command)}\n"
+            f"rsync upload failed (exit {result.returncode})\n"
             f"stderr: {result.stderr}"
         )
 
@@ -138,7 +138,7 @@ def copy_from_remote(
     result = subprocess.run(scp_command, check=False, text=True, capture_output=True)
     if result.returncode != 0:
         raise SSHError(
-            f"SCP download failed ({result.returncode}): {' '.join(scp_command)}\n"
+            f"SCP download failed (exit {result.returncode})\n"
             f"stderr: {result.stderr}"
         )
 
@@ -189,7 +189,7 @@ def sync_directory_to_remote(
     )
     if result.returncode != 0:
         raise SSHError(
-            f"rsync failed ({result.returncode}): {' '.join(rsync_command)}\n"
+            f"rsync sync failed (exit {result.returncode})\n"
             f"stderr: {result.stderr}"
         )
 
@@ -244,6 +244,6 @@ def sync_directory_from_remote(
     )
     if result.returncode != 0:
         raise SSHError(
-            f"rsync failed ({result.returncode}): {' '.join(rsync_command)}\n"
+            f"rsync download failed (exit {result.returncode})\n"
             f"stderr: {result.stderr}"
         )

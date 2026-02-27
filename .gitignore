@@ -1,5 +1,6 @@
 # macOS
 .DS_Store
+Thumbs.db
 
 # Python
 __pycache__/
@@ -69,5 +70,10 @@ checkpoint-*/
 .cache/
 ~/.cache/huggingface/
 
+# Environment lockfiles (local snapshot, not shared)
+koa-env.lock.yaml
+
 # Agents
 .claude/
+CLAUDE.md
+

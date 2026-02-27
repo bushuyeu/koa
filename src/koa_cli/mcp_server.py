@@ -577,11 +577,11 @@ def koa_audit(days: int = 7, max_jobs: int = 20) -> str:
         max_jobs: Maximum jobs to analyze (default: 20).
     """
     config = _load_cfg()
-    days = max(1, days)
-    max_jobs = max(1, max_jobs)
+    days = int(max(1, days))
+    max_jobs = int(max(1, max_jobs))
 
     sacct_cmd = (
-        f"sacct -u {config.user} "
+        f"sacct -u {shlex.quote(config.user)} "
         f"--format=JobID,JobName%30,MaxRSS,ReqMem,Elapsed,Timelimit,AllocCPUS,TotalCPU,AllocTRES%60,State%20 "
         f"-P -n "
         f"--starttime=$(date -d '{days} days ago' +%Y-%m-%d 2>/dev/null || date -v-{days}d +%Y-%m-%d)"
@@ -745,7 +745,7 @@ def koa_limits() -> str:
         result = run_ssh(
             config,
             ["sacctmgr", "show", "assoc",
-             f"where user={config.user}",
+             f"where user={shlex.quote(config.user)}",
              "format=Account,User,QOS,MaxTRESPerUser,MaxJobs,MaxSubmit,GrpTRES",
              "-P", "-n"],
             capture_output=True,
@@ -1778,11 +1778,11 @@ def koa_budget(days: int = 30) -> str:
     from datetime import datetime, timedelta
 
     config = _load_cfg()
-    days = max(1, days)
+    days = int(max(1, days))
 
     # 1. Query sacct for GPU-hours
     sacct_cmd = (
-        f"sacct -u {config.user} "
+        f"sacct -u {shlex.quote(config.user)} "
         f"--format=JobID,JobName%30,Partition,State%20,Elapsed,AllocTRES%60,Start,End "
         f"-P -n "
         f"--starttime=$(date -d '{days} days ago' +%Y-%m-%d 2>/dev/null || date -v-{days}d +%Y-%m-%d)"
@@ -1899,7 +1899,7 @@ def koa_budget(days: int = 30) -> str:
         assoc_result = run_ssh(
             config,
             ["bash", "-lc",
-             f"sacctmgr show assoc user={config.user} format=Account,GrpTRESMins --parsable2 --noheader"],
+             f"sacctmgr show assoc user={shlex.quote(config.user)} format=Account,GrpTRESMins --parsable2 --noheader"],
             capture_output=True,
         )
         for aline in assoc_result.stdout.strip().splitlines():
