@@ -43,29 +43,22 @@ Host koa koa.its.hawaii.edu
   IdentitiesOnly yes
   IdentityFile <path to secret key: e.g. ~/.ssh/koa_key>
   ControlMaster auto
-  ControlPath ~/.ssh/cm-%C
-  ControlPersist 1h
+  ControlPath ~/.ssh/control-%r@%h:%p
+  ControlPersist 25h
   ServerAliveInterval 60
   ServerAliveCountMax 3
-  TCPKeepAlive yes
-  StrictHostKeyChecking accept-new
 ```
+
+For automated daily DUO authentication (tap "Approve" on your phone once per day), see `scripts/koa-auth-setup.sh`.
 
 ## Installation
 
 ```bash
-# Recommended: pipx keeps koa isolated but available everywhere
-# (install pipx with `python3 -m pip install --user pipx` then `python3 -m pipx ensurepath` if needed)
-pipx install --force git+https://github.com/YosubShin/koa.git
+# Recommended: uv tool keeps koa isolated but available everywhere
+uv tool install git+https://github.com/bushuyeu/koa.git
 
-# Alternatively: per-user install (ensure ~/.local/bin is on PATH)
-python3 -m pip install --user git+https://github.com/YosubShin/koa.git
-
-# Development: editable install inside a throwaway venv
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip setuptools wheel
-pip install -e .
+# Development: editable install
+uv tool install --force --editable .
 ```
 
 The CLI installs the entry point `koa`.
@@ -385,13 +378,7 @@ KOA is designed to be operated by AI agents as well as humans. Three integration
 
 The `koa-mcp` entry point exposes all commands as [Model Context Protocol](https://modelcontextprotocol.io/) tools, letting AI assistants manage your HPC jobs directly.
 
-Install with MCP support and configure in Claude Code:
-
-```bash
-pip install -e ".[mcp]"
-```
-
-Add to `~/.claude/settings.json`:
+Configure in `~/.claude/settings.json`:
 
 ```json
 {
@@ -430,10 +417,8 @@ koa optimize scripts/train.slurm --format json
 
 ## Development
 
-Install development tooling with:
-
 ```bash
-pip install -e ".[dev]"
+uv tool install --force --editable .
 ruff check
 pytest
 ```
