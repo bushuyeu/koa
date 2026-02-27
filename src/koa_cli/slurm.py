@@ -302,3 +302,18 @@ def queue_status(config: Config, partition: Optional[str] = None) -> str:
 
     result = run_ssh(config, cmd, capture_output=True)
     return result.stdout
+
+
+def get_cluster_availability(config: Config, partition: Optional[str] = None) -> str:
+    """Query sinfo for per-node GPU inventory. Returns raw pipe-delimited output."""
+    cmd: List[str] = [
+        "sinfo",
+        "-N",
+        "-o", "%N|%P|%G|%T|%C|%m",
+        "--noheader",
+    ]
+    if partition:
+        cmd.extend(["-p", partition])
+
+    result = run_ssh(config, cmd, capture_output=True)
+    return result.stdout

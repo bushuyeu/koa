@@ -28,6 +28,7 @@ from .config import (
 )
 from .slurm import (
     cancel_job,
+    get_cluster_availability,
     get_job_io_paths,
     list_jobs,
     parse_gpu_count_from_script,
@@ -309,6 +310,15 @@ def _build_parser() -> argparse.ArgumentParser:
     queue_parser.add_argument(
         "--partition", "-p",
         help="Filter queue to a specific partition.",
+    )
+
+    availability_parser = subparsers.add_parser(
+        "availability", help="Show real-time GPU/node inventory across the cluster."
+    )
+    _add_common_arguments(availability_parser)
+    availability_parser.add_argument(
+        "--partition", "-p",
+        help="Filter to a specific partition.",
     )
 
     dashboard_parser = subparsers.add_parser(
@@ -1046,6 +1056,18 @@ def _queue(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
+def _availability(args: argparse.Namespace, config: Config) -> int:
+    from .formatting import format_availability_table
+
+    partition = getattr(args, "partition", None)
+    raw = get_cluster_availability(config, partition=partition)
+    if raw and raw.strip():
+        format_availability_table(raw, partition=partition)
+    else:
+        print("No node data available.")
+    return 0
+
+
 def _check(_: argparse.Namespace, config: Config) -> int:
     print(run_health_checks(config), end="")
     return 0
@@ -1185,6 +1207,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return _jobs(args, config)
         if args.command == "queue":
             return _queue(args, config)
+        if args.command == "availability":
+            return _availability(args, config)
         if args.command == "dashboard":
             return _dashboard(args, config)
         if args.command == "check":

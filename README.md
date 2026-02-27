@@ -8,6 +8,7 @@ A lightweight command-line companion for the University of Hawai'i KOA cluster. 
 - **Job submission pipeline** – copy a script, infer sensible defaults, and hand it to `sbatch` with a single command.
 - **Auto GPU selection** – automatically detects the best available GPU type on the target partition and injects the right `--gres` flag (ranked H200 > H100 > A100 > A40 > L40 > A30 > V100 > RTX2080Ti).
 - **Cluster queue view** – see the full cluster queue with your own jobs highlighted in bold, others dimmed, all in a Rich-formatted table.
+- **GPU availability** – real-time GPU/node inventory color-coded by state (green=idle, yellow=mixed, red=down) with a summary of GPU counts by type.
 - **Workspace snapshots** – every submission bundles the exact repo state so jobs run with reproducible code and configs.
 - **Run manifests** – each submission stores git state and relevant untracked files alongside the job results for reproducibility.
 - **Global setup** – one-time `koa setup` captures usernames, workspace roots, and a default CUDA Toolkit version for each backend.
@@ -167,6 +168,8 @@ koa submit scripts/basic_job.slurm --env MODEL_NAME=qwen3-vl-4b-instruct --env D
 koa jobs               # your jobs in a Rich-formatted table
 koa queue              # full cluster queue (your jobs highlighted)
 koa queue -p sandbox   # filter to a specific partition
+koa availability       # GPU/node inventory across the cluster
+koa availability -p kill-shared  # filter to a specific partition
 koa cancel <job-id>
 koa logs <job-id> --follow
 koa runs list
@@ -184,6 +187,7 @@ Every submitted job includes a `run_metadata/` folder under its results director
 - `init` – scaffold project config and helper scripts using global defaults.
 - `jobs` – list your queued and running jobs in a Rich-formatted table with color-coded states (green = running, yellow = pending, red = failed).
 - `queue` – display the full cluster queue as a Rich table. Your own jobs are **bold and color-coded**; other users' jobs are dimmed. Use `--partition`/`-p` to filter by partition.
+- `availability` – show a real-time GPU/node inventory table. Rows are color-coded by state (green=idle, yellow=mixed/allocated, red=down/drained). Includes a summary footer with GPU counts grouped by type and state. Use `--partition`/`-p` to filter.
 - `dashboard` – open the Streamlit dashboard with job history, logs, and GPU node views.
 - `submit` – copy a script and call `sbatch`; use `--sbatch-arg` for raw overrides. Add flags like `--gpus` (generic count), `--constraint hopper`, or `--desc` to control resources and the timestamped results folder name. Forward env vars with `--env NAME` or `--env NAME=value`, and set defaults in `env_pass` within `koa-config.yaml`.
   - **Auto GPU selection** is enabled by default. The CLI queries `sinfo` for idle/mix nodes on the target partition, ranks available GPU types by priority (H200 > H100 > A100 > A40 > L40 > A30 > V100 > RTX2080Ti), and injects the appropriate `--gres=gpu:<type>:<count>` flag. The GPU count is read from `#SBATCH --gres=gpu:N` in your script (defaults to 1).
