@@ -1209,10 +1209,12 @@ def koa_watch_once(gpu_type: Optional[str] = None, partition: Optional[str] = No
     total_free = sum(filtered.values())
     best = select_best_gpu(config, partition=partition)
 
+    from .commands import gpu_selection_json
     return json.dumps({
         "available_gpus": filtered,
         "total_free_gpus": total_free,
         "best_available": best,
+        "gpu_selection": gpu_selection_json(config, best, 1, partition),
         "filter": {"gpu_type": gpu_type, "partition": partition},
     }, indent=2)
 
@@ -1275,14 +1277,17 @@ def koa_submit(
 
     # GPU selection
     from .slurm import parse_gpu_count_from_script
+    from .commands import gpu_selection_json
     gpu_count = gpus or parse_gpu_count_from_script(script_path)
+    gpu_selection_info = None
     if gpu_type:
         sbatch_args.append(f"--gres=gpu:{gpu_type}:{gpu_count}")
     elif not gpus:
-        # Auto-select best GPU
+        # Auto-select best GPU (queue-aware)
         target_partition = partition or config.default_partition
-        best = select_best_gpu(config, partition=target_partition)
+        best = select_best_gpu(config, partition=target_partition, min_gpus=gpu_count)
         sbatch_args.append(f"--gres=gpu:{best}:{gpu_count}")
+        gpu_selection_info = gpu_selection_json(config, best, gpu_count, target_partition)
     else:
         sbatch_args.append(f"--gres=gpu:{gpu_count}")
 
@@ -1298,13 +1303,16 @@ def koa_submit(
     except (SSHError, FileNotFoundError) as exc:
         return json.dumps({"error": f"Submission failed: {exc}"})
 
-    return json.dumps({
+    result = {
         "status": "submitted",
         "job_id": job_id,
         "job_script": str(script_path),
         "sbatch_args": sbatch_args,
         "description": desc,
-    }, indent=2)
+    }
+    if gpu_selection_info:
+        result["gpu_selection"] = gpu_selection_info
+    return json.dumps(result, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -2020,8 +2028,9 @@ def koa_jupyter(
     config = _load_cfg()
     part = partition or config.default_partition or "kill-shared"
 
-    # Auto-select GPU
-    selected_gpu = gpu_type or select_best_gpu(config, part)
+    # Auto-select GPU (queue-aware)
+    from .commands import gpu_selection_json
+    selected_gpu = gpu_type or select_best_gpu(config, part, min_gpus=gpus)
 
     # Generate token and random remote port
     token = secrets.token_hex(24)
@@ -2085,7 +2094,7 @@ def koa_jupyter(
 
     job_id = match.group(1)
 
-    return json.dumps({
+    result_data = {
         "job_id": job_id,
         "gpu_type": selected_gpu,
         "gpus": gpus,
@@ -2094,6 +2103,7 @@ def koa_jupyter(
         "token": token,
         "remote_script": remote_script,
         "status": "submitted",
+        "gpu_selection": gpu_selection_json(config, selected_gpu, gpus, part),
         "instructions": (
             f"Job {job_id} submitted. To connect:\n"
             f"1. Wait for the job to start: squeue -j {job_id}\n"
@@ -2102,7 +2112,8 @@ def koa_jupyter(
             f"4. Open in browser: http://localhost:8888/?token={token}\n"
             f"\nOr use the CLI for automatic tunnel: koa jupyter"
         ),
-    }, indent=2)
+    }
+    return json.dumps(result_data, indent=2)
 
 
 # ---------------------------------------------------------------------------

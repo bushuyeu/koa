@@ -980,11 +980,12 @@ def _submit(args: argparse.Namespace, config: Config) -> int:
         or _has_gres_flag(script_sbatch_args)
     )
     if auto_gpu:
+        from .commands import print_gpu_selection
         target_partition = args.partition or config.default_partition
-        gpu_type = select_best_gpu(config, partition=target_partition)
         gpu_count = parse_gpu_count_from_script(Path(args.job_script))
+        gpu_type = select_best_gpu(config, partition=target_partition, min_gpus=gpu_count)
         sbatch_args.append(f"--gres=gpu:{gpu_type}:{gpu_count}")
-        print(f"Auto-selected GPU: {gpu_type} x{gpu_count}")
+        print_gpu_selection(config, gpu_type, gpu_count, target_partition)
 
     try:
         export_envs, missing_config_envs = _collect_export_envs(

@@ -17,7 +17,7 @@ from ..config import Config
 from ..ssh import SSHError, run_ssh
 from ..slurm import SBATCH_JOB_ID_PATTERN, select_best_gpu
 
-from . import add_common_arguments, emit_json
+from . import add_common_arguments, emit_json, print_gpu_selection
 
 console = Console()
 
@@ -74,29 +74,62 @@ conda activate {conda_env}
 """
 
 
-def _wait_for_running(
-    config: Config, job_id: str, timeout: int = POLL_TIMEOUT
-) -> str:
-    """Poll squeue until the job is RUNNING. Returns the node name."""
-    elapsed = 0
-    while elapsed < timeout:
+def _get_job_queue_position(config: Config, job_id: str) -> Optional[int]:
+    """Return the 1-indexed queue position for a pending job, or None."""
+    try:
         result = run_ssh(
             config,
-            ["squeue", "-j", job_id, "-h", "-o", "%T|%N"],
+            ["squeue", "-t", "PD", "--sort=p,i", "-o", "%i", "--noheader"],
             capture_output=True,
             check=False,
         )
-        output = (result.stdout or "").strip()
-        if output:
-            parts = output.split("|", 1)
-            state = parts[0].strip()
-            node = parts[1].strip() if len(parts) > 1 else ""
-            if state == "RUNNING" and node:
-                return node
-            if state in ("FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL"):
-                raise RuntimeError(f"Job {job_id} entered state {state}")
-        time.sleep(POLL_INTERVAL)
-        elapsed += POLL_INTERVAL
+        if result.returncode != 0:
+            return None
+        for pos, line in enumerate(result.stdout.strip().splitlines(), 1):
+            if line.strip() == str(job_id):
+                return pos
+        return None
+    except SSHError:
+        return None
+
+
+def _wait_for_running(
+    config: Config, job_id: str, timeout: int = POLL_TIMEOUT
+) -> str:
+    """Poll squeue until the job is RUNNING. Returns the node name.
+
+    Displays a Rich spinner with queue position during the wait.
+    """
+    elapsed = 0
+    with console.status(
+        f"[bold]Waiting for job {job_id} to start...[/bold]",
+        spinner="dots",
+    ) as status:
+        while elapsed < timeout:
+            result = run_ssh(
+                config,
+                ["squeue", "-j", job_id, "-h", "-o", "%T|%N"],
+                capture_output=True,
+                check=False,
+            )
+            output = (result.stdout or "").strip()
+            if output:
+                parts = output.split("|", 1)
+                state = parts[0].strip()
+                node = parts[1].strip() if len(parts) > 1 else ""
+                if state == "RUNNING" and node:
+                    return node
+                if state in ("FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL"):
+                    raise RuntimeError(f"Job {job_id} entered state {state}")
+                if state == "PENDING":
+                    pos = _get_job_queue_position(config, job_id)
+                    if pos is not None:
+                        status.update(
+                            f"[bold]Waiting for job {job_id}...[/bold] "
+                            f"(queue position: [cyan]#{pos}[/cyan])"
+                        )
+            time.sleep(POLL_INTERVAL)
+            elapsed += POLL_INTERVAL
 
     raise TimeoutError(
         f"Job {job_id} did not start within {timeout // 60} minutes"
@@ -215,12 +248,12 @@ def handle(args, config: Config) -> int:
     token = secrets.token_hex(24)
     remote_port = random.randint(49152, 65535)
 
-    # 3. Auto-select GPU
+    # 3. Auto-select GPU (queue-aware, filtered by requested GPU count)
     gpu_type = args.gpu_type
     if not gpu_type:
         console.print("Auto-selecting best available GPU...")
-        gpu_type = select_best_gpu(config, partition)
-        console.print(f"Selected GPU: [bold cyan]{gpu_type}[/bold cyan]")
+        gpu_type = select_best_gpu(config, partition, min_gpus=gpus)
+        print_gpu_selection(config, gpu_type, gpus, partition, console=console)
 
     # 4. Build SLURM script and write to remote
     script_content = _build_slurm_script(
@@ -268,7 +301,7 @@ def handle(args, config: Config) -> int:
             _cleanup(config, None, None, remote_script)
             return 1
         job_id = match.group(1)
-        console.print(f"Job [bold]{job_id}[/bold] submitted. Waiting for allocation...")
+        console.print(f"Job [bold]{job_id}[/bold] submitted.")
 
         # 6. Poll until running
         node = _wait_for_running(config, job_id)

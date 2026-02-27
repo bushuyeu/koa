@@ -29,6 +29,23 @@ GPU_PRIORITY: Dict[str, int] = {
     "nvidia_a30_1g.6gb": 20,      # A30 MIG 1g slice, 6GB
 }
 
+# GPU VRAM in GB (for adequacy checks)
+GPU_VRAM_GB: Dict[str, int] = {
+    "nvidia_h200_nvl": 141,
+    "nvidia_h100_nvl": 94,
+    "nvidia_h100_pcie": 80,
+    "NV-H100": 80,
+    "NV-L40": 48,
+    "NV-V100-SXM2": 32,
+    "NV-A30": 24,
+    "NV-RTX-A4000": 16,
+    "NV-RTX5000": 16,
+    "nvidia_a30_2g.12gb": 12,
+    "NV-RTX2080Ti": 11,
+    "NV-RTX2070": 8,
+    "nvidia_a30_1g.6gb": 6,
+}
+
 # Map lowercased GPU names from sinfo to SLURM GRES names (preserving case)
 GPU_NAME_MAP: Dict[str, str] = {
     "nvidia_h200_nvl": "nvidia_h200_nvl",
@@ -264,8 +281,102 @@ def get_available_gpus(config: Config, partition: Optional[str] = None) -> Dict[
     return available
 
 
-def select_best_gpu(config: Config, partition: Optional[str] = None) -> str:
-    """Select the highest-priority available GPU on the given partition.
+def get_max_gpus_per_node(config: Config, partition: Optional[str] = None) -> Dict[str, int]:
+    """Query sinfo for the max GPUs per node for each type. Returns {gpu_type: max_count}."""
+    part = partition or config.default_partition or DEFAULT_PARTITION
+    result = run_ssh(
+        config,
+        [
+            "sinfo",
+            "-p", part,
+            "--Format=nodehost,gres:30",
+            "--noheader",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if not result.stdout:
+        return {}
+
+    max_per_node: Dict[str, int] = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        gres_field = fields[1].strip()
+        for gres_entry in gres_field.split(","):
+            gres_entry = gres_entry.strip()
+            if not gres_entry.startswith("gpu:"):
+                continue
+            gres_parts = gres_entry.split(":")
+            if len(gres_parts) < 3:
+                continue
+            gpu_name = gres_parts[1].lower()
+            count_str = gres_parts[2].split("(")[0]
+            try:
+                count = int(count_str)
+            except ValueError:
+                continue
+            normalized = GPU_NAME_MAP.get(gpu_name, gpu_name)
+            max_per_node[normalized] = max(max_per_node.get(normalized, 0), count)
+
+    return max_per_node
+
+
+def get_pending_gpu_counts(
+    config: Config, partition: Optional[str] = None
+) -> Dict[str, int]:
+    """Query squeue for pending jobs per GPU type. Returns {gpu_type: pending_job_count}."""
+    part = partition or config.default_partition or DEFAULT_PARTITION
+    result = run_ssh(
+        config,
+        ["squeue", "-t", "PD", "-p", part, "-h", "-o", "%b"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return {}
+
+    pending: Dict[str, int] = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Parse GRES like "gpu:NV-A30:1" or "gres/gpu:NV-A30:1"
+        if "gpu:" not in line:
+            continue
+        gpu_part = line[line.index("gpu:") :]
+        gres_parts = gpu_part.split(":")
+        if len(gres_parts) < 3:
+            continue
+        gpu_name = gres_parts[1]
+        normalized = GPU_NAME_MAP.get(gpu_name.lower(), gpu_name)
+        pending[normalized] = pending.get(normalized, 0) + 1
+
+    return pending
+
+
+def select_best_gpu(
+    config: Config,
+    partition: Optional[str] = None,
+    *,
+    queue_aware: bool = True,
+    min_gpus: int = 1,
+) -> str:
+    """Select the best available GPU, balancing compute power and queue depth.
+
+    When queue_aware is True (default), each GPU type is scored as:
+        score = priority / (1 + pending_jobs)
+
+    This means an H100 (priority 100) with 1 pending job scores 50,
+    beating an RTX 2070 (priority 25) with no queue. But an RTX 2080 Ti
+    (priority 35) with no queue beats an A30 (priority 75) with 4 pending.
+
+    When min_gpus > 1, GPU types that have fewer than min_gpus per node
+    are filtered out (can't satisfy the request on a single node).
 
     Returns the GRES GPU type name (e.g. 'nvidia_h200_nvl', 'NV-A30').
     Falls back to 'NV-RTX2080Ti' if nothing is detected.
@@ -274,8 +385,25 @@ def select_best_gpu(config: Config, partition: Optional[str] = None) -> str:
     if not available:
         return "NV-RTX2080Ti"
 
-    best_type = max(available, key=lambda g: GPU_PRIORITY.get(g, 0))
-    return best_type
+    # Filter by min GPUs per node
+    if min_gpus > 1:
+        max_per_node = get_max_gpus_per_node(config, partition)
+        candidates = {
+            g: c for g, c in available.items()
+            if max_per_node.get(g, 0) >= min_gpus
+        }
+        if candidates:
+            available = candidates
+
+    if not queue_aware:
+        return max(available, key=lambda g: GPU_PRIORITY.get(g, 0))
+
+    pending = get_pending_gpu_counts(config, partition)
+
+    def _score(g: str) -> float:
+        return GPU_PRIORITY.get(g, 0) / (1 + pending.get(g, 0))
+
+    return max(available, key=_score)
 
 
 def parse_gpu_count_from_script(script_path: Path) -> int:
