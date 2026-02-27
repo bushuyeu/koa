@@ -291,11 +291,13 @@ def format_availability_table(
             available = s.get("available", 0)
             offline = s.get("offline", 0)
             q = pending.get(gpu_type, 0)
+            # Skip GPU types that are entirely offline
+            if available == 0:
+                continue
             queue_str = (
                 "[green]no queue[/green]" if q == 0
                 else f"[yellow]{q} pending[/yellow]"
             )
-            offline_str = str(offline) if offline else "[dim]0[/dim]"
-            sum_table.add_row(gpu_type, queue_str, str(available), offline_str)
+            sum_table.add_row(gpu_type, queue_str, str(available), "[dim]0[/dim]")
 
         console.print(sum_table)
