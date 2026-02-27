@@ -6,6 +6,8 @@ A lightweight command-line companion for the University of Hawai'i KOA cluster. 
 
 ## Highlights
 - **Job submission pipeline** – copy a script, infer sensible defaults, and hand it to `sbatch` with a single command.
+- **Auto GPU selection** – automatically detects the best available GPU type on the target partition and injects the right `--gres` flag (ranked H200 > H100 > A100 > A40 > L40 > A30 > V100 > RTX2080Ti).
+- **Cluster queue view** – see the full cluster queue with your own jobs highlighted in bold, others dimmed, all in a Rich-formatted table.
 - **Workspace snapshots** – every submission bundles the exact repo state so jobs run with reproducible code and configs.
 - **Run manifests** – each submission stores git state and relevant untracked files alongside the job results for reproducibility.
 - **Global setup** – one-time `koa setup` captures usernames, workspace roots, and a default CUDA Toolkit version for each backend.
@@ -144,8 +146,17 @@ koa init
 # 1. Check connectivity and cluster health
 koa check
 
-# 2. Submit a job script (declare GPU resources in the SLURM script, or add `--gpus` for a generic count)
+# 2. Submit a job script
+#    Auto GPU selection picks the best available GPU automatically
 koa submit scripts/basic_job.slurm --time 01:00:00 --desc "baseline"
+# Auto-selected GPU: h100 x1
+# Submitted KOA job 123456
+
+# disable auto GPU selection if you want manual control
+koa submit scripts/basic_job.slurm --no-auto-gpu --gpus 2
+# or specify an explicit GRES
+koa submit scripts/basic_job.slurm --no-auto-gpu --sbatch-arg "--gres=gpu:a100:4"
+
 # every submission writes a repo snapshot + run metadata under <local results>/<job-id>/
   # run_metadata/ includes env_hashes.json for watched setup files
 # forward local env into the job (NAME pulls from your shell; NAME=val sets explicitly)
@@ -153,7 +164,9 @@ MODEL_NAME=qwen3-vl-4b-instruct koa submit scripts/basic_job.slurm --env MODEL_N
 koa submit scripts/basic_job.slurm --env MODEL_NAME=qwen3-vl-4b-instruct --env DATA_ROOT=/data/run123
 
 # 3. Monitor jobs and inspect runs
-koa jobs
+koa jobs               # your jobs in a Rich-formatted table
+koa queue              # full cluster queue (your jobs highlighted)
+koa queue -p sandbox   # filter to a specific partition
 koa cancel <job-id>
 koa logs <job-id> --follow
 koa runs list
@@ -169,9 +182,12 @@ Every submitted job includes a `run_metadata/` folder under its results director
 - `check` – run a quick SSH round-trip and display `sinfo` output.
 - `setup` – configure global defaults (user, workspace roots, default CUDA Toolkit version).
 - `init` – scaffold project config and helper scripts using global defaults.
-- `jobs` – list your queued and running jobs via `squeue`.
+- `jobs` – list your queued and running jobs in a Rich-formatted table with color-coded states (green = running, yellow = pending, red = failed).
+- `queue` – display the full cluster queue as a Rich table. Your own jobs are **bold and color-coded**; other users' jobs are dimmed. Use `--partition`/`-p` to filter by partition.
 - `dashboard` – open the Streamlit dashboard with job history, logs, and GPU node views.
 - `submit` – copy a script and call `sbatch`; use `--sbatch-arg` for raw overrides. Add flags like `--gpus` (generic count), `--constraint hopper`, or `--desc` to control resources and the timestamped results folder name. Forward env vars with `--env NAME` or `--env NAME=value`, and set defaults in `env_pass` within `koa-config.yaml`.
+  - **Auto GPU selection** is enabled by default. The CLI queries `sinfo` for idle/mix nodes on the target partition, ranks available GPU types by priority (H200 > H100 > A100 > A40 > L40 > A30 > V100 > RTX2080Ti), and injects the appropriate `--gres=gpu:<type>:<count>` flag. The GPU count is read from `#SBATCH --gres=gpu:N` in your script (defaults to 1).
+  - Pass `--no-auto-gpu` to disable this behavior, or use `--gpus` / `--gres` to override manually.
 - `cancel` – stop a job by ID with `scancel`.
 - `logs` – stream or inspect a job's stdout/stderr in real time via `tail` (stored at `<remote results dir>/<job-id>/job.log` and `job.err`).
 - `runs` – sync and inspect the local catalog of submitted jobs.
@@ -180,6 +196,68 @@ Every submitted job includes a `run_metadata/` folder under its results director
   - `koa runs show <job-id>` prints the recorded metadata (git commit, env hashes, locations) for a single run.
 
 Each command accepts `--config /path/to/config.yaml` if you need to swap between multiple KOA accounts, and `--backend <cluster_name>` to target a specific Slurm backend when you have more than one configured.
+
+---
+
+## Auto GPU Selection
+
+When you run `koa submit`, the CLI automatically selects the best available GPU type on the target partition. This eliminates the need to manually check node availability or remember GRES names.
+
+**How it works:**
+
+1. Queries `sinfo` for nodes in `idle` or `mix` state on the target partition.
+2. Parses the GRES field to identify available GPU types and counts.
+3. Ranks GPUs by priority:
+
+   | Rank | GPU | Priority Score |
+   |------|-----|---------------|
+   | 1 | H200 | 110 |
+   | 2 | H100 | 100 |
+   | 3 | A100 | 90 |
+   | 4 | A40 | 80 |
+   | 5 | L40 | 75 |
+   | 6 | A30 | 70 |
+   | 7 | V100 | 60 |
+   | 8 | RTX A6000 | 55 |
+   | 9 | RTX A5000 | 50 |
+   | 10 | RTX 2080 Ti | 40 |
+   | 11 | T4 | 30 |
+
+4. Injects `--gres=gpu:<best_type>:<count>` into the `sbatch` command.
+
+**GPU count** is read from `#SBATCH --gres=gpu:N` in your script. If no such directive exists, it defaults to 1.
+
+**Disable** auto selection with `--no-auto-gpu`, or override it with `--gpus` or an explicit `--gres` via `--sbatch-arg`.
+
+```bash
+# Auto-selects best GPU (default)
+koa submit scripts/basic_job.slurm
+
+# Disable auto selection
+koa submit scripts/basic_job.slurm --no-auto-gpu
+
+# Manual override (also disables auto selection)
+koa submit scripts/basic_job.slurm --gpus 4
+```
+
+---
+
+## Cluster Queue View
+
+Use `koa queue` to see all jobs across the cluster at a glance. Your own jobs are highlighted in **bold** with color-coded state indicators, while other users' jobs appear dimmed.
+
+```bash
+# Full cluster queue
+koa queue
+
+# Filter by partition
+koa queue --partition sandbox
+koa queue -p kill-shared
+```
+
+The table includes: Job ID, User, Name, State, Time, Time Limit, Nodes, CPUs, Min Memory, and Node List. A caption at the bottom shows how many of your jobs are currently in the queue.
+
+The `koa jobs` command also now uses Rich-formatted output with the same color coding (green for running, yellow for pending, red for failed/cancelled).
 
 ---
 

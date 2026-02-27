@@ -30,7 +30,10 @@ from .slurm import (
     cancel_job,
     get_job_io_paths,
     list_jobs,
+    parse_gpu_count_from_script,
+    queue_status,
     run_health_checks,
+    select_best_gpu,
     submit_job,
 )
 from .ssh import (
@@ -299,6 +302,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_common_arguments(jobs_parser)
 
+    queue_parser = subparsers.add_parser(
+        "queue", help="Show the full cluster queue with your jobs highlighted."
+    )
+    _add_common_arguments(queue_parser)
+    queue_parser.add_argument(
+        "--partition", "-p",
+        help="Filter queue to a specific partition.",
+    )
+
     dashboard_parser = subparsers.add_parser(
         "dashboard", help="Launch the KOA Streamlit dashboard."
     )
@@ -345,6 +357,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="Forward an environment variable into the job (NAME or NAME=value). Repeatable.",
+    )
+    submit_parser.add_argument(
+        "--no-auto-gpu",
+        action="store_true",
+        help="Disable automatic GPU type selection (by default, the best available GPU is chosen).",
     )
     submit_parser.add_argument(
         "--sbatch-arg",
@@ -877,6 +894,21 @@ def _submit(args: argparse.Namespace, config: Config) -> int:
     ):
         sbatch_args.append(f"--gres={config.default_gres}")
 
+    # Auto GPU selection: if no --gres is set anywhere and auto-gpu is not disabled,
+    # pick the best available GPU type on the target partition.
+    auto_gpu = not (
+        getattr(args, "no_auto_gpu", False)
+        or args.gpus
+        or _has_gres_flag(sbatch_args)
+        or _has_gres_flag(script_sbatch_args)
+    )
+    if auto_gpu:
+        target_partition = args.partition or config.default_partition
+        gpu_type = select_best_gpu(config, partition=target_partition)
+        gpu_count = parse_gpu_count_from_script(Path(args.job_script))
+        sbatch_args.append(f"--gres=gpu:{gpu_type}:{gpu_count}")
+        print(f"Auto-selected GPU: {gpu_type} x{gpu_count}")
+
     try:
         export_envs, missing_config_envs = _collect_export_envs(
             args.env or [],
@@ -992,7 +1024,25 @@ def _cancel(args: argparse.Namespace, config: Config) -> int:
 
 
 def _jobs(_: argparse.Namespace, config: Config) -> int:
-    print(list_jobs(config), end="")
+    from .formatting import format_jobs_table
+
+    raw = list_jobs(config)
+    if raw and raw.strip():
+        format_jobs_table(raw, config.user)
+    else:
+        print("No active jobs.")
+    return 0
+
+
+def _queue(args: argparse.Namespace, config: Config) -> int:
+    from .formatting import format_queue_table
+
+    partition = getattr(args, "partition", None)
+    raw = queue_status(config, partition=partition)
+    if raw and raw.strip():
+        format_queue_table(raw, config.user, partition=partition)
+    else:
+        print("Queue is empty.")
     return 0
 
 
@@ -1133,6 +1183,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return _cancel(args, config)
         if args.command == "jobs":
             return _jobs(args, config)
+        if args.command == "queue":
+            return _queue(args, config)
         if args.command == "dashboard":
             return _dashboard(args, config)
         if args.command == "check":

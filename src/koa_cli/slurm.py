@@ -3,13 +3,45 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .config import Config
 from .ssh import SSHError, copy_to_remote, run_ssh
 
 SBATCH_JOB_ID_PATTERN = re.compile(r"Submitted batch job (\d+)")
 DEFAULT_PARTITION = "kill-shared"
+
+# GPU priority ranking — higher score = more desirable
+GPU_PRIORITY: Dict[str, int] = {
+    "h200": 110,
+    "h100": 100,
+    "a100": 90,
+    "a40": 80,
+    "l40": 75,
+    "a30": 70,
+    "v100": 60,
+    "rtx_a6000": 55,
+    "rtx_a5000": 50,
+    "rtx2080ti": 40,
+    "t4": 30,
+}
+
+# Map detected GPU names from sinfo to SLURM GRES names
+GPU_NAME_MAP: Dict[str, str] = {
+    "h200": "h200",
+    "h100": "h100",
+    "a100": "a100",
+    "a40": "a40",
+    "l40": "l40",
+    "a30": "a30",
+    "v100": "v100",
+    "v100s": "v100",
+    "rtx_a6000": "rtx_a6000",
+    "rtx_a5000": "rtx_a5000",
+    "rtx2080ti": "rtx2080ti",
+    "rtx_2080_ti": "rtx2080ti",
+    "t4": "t4",
+}
 
 
 @dataclass
@@ -181,3 +213,92 @@ def get_job_io_paths(config: Config, job_id: str) -> JobIOPaths:
         elif line.startswith("StdErr="):
             stderr_path = line.split("=", 1)[1] or None
     return JobIOPaths(stdout=stdout_path, stderr=stderr_path)
+
+
+def get_available_gpus(config: Config, partition: Optional[str] = None) -> Dict[str, int]:
+    """Query sinfo for available GPUs on idle/mix nodes. Returns {gpu_type: count}."""
+    part = partition or config.default_partition or DEFAULT_PARTITION
+    result = run_ssh(
+        config,
+        [
+            "sinfo",
+            "-p", part,
+            "--Format=nodehost,gres:30,statecompact",
+            "--noheader",
+        ],
+        capture_output=True,
+    )
+
+    available: Dict[str, int] = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        gres_field = parts[1].strip()
+        state = parts[2].strip().lower().rstrip("*")
+        if state not in ("idle", "mix", "mixed"):
+            continue
+        # Parse gres like "gpu:h100:4" or "gpu:a100:2(S:0-1)"
+        for gres_entry in gres_field.split(","):
+            gres_entry = gres_entry.strip()
+            if not gres_entry.startswith("gpu:"):
+                continue
+            gres_parts = gres_entry.split(":")
+            if len(gres_parts) < 3:
+                continue
+            gpu_name = gres_parts[1].lower()
+            count_str = gres_parts[2].split("(")[0]
+            try:
+                count = int(count_str)
+            except ValueError:
+                continue
+            normalized = GPU_NAME_MAP.get(gpu_name, gpu_name)
+            available[normalized] = available.get(normalized, 0) + count
+
+    return available
+
+
+def select_best_gpu(config: Config, partition: Optional[str] = None) -> str:
+    """Select the highest-priority available GPU on the given partition.
+
+    Returns the GRES GPU type name (e.g. 'h100', 'a100').
+    Falls back to 'rtx2080ti' if nothing is detected.
+    """
+    available = get_available_gpus(config, partition)
+    if not available:
+        return "rtx2080ti"
+
+    best_type = max(available, key=lambda g: GPU_PRIORITY.get(g, 0))
+    return best_type
+
+
+def parse_gpu_count_from_script(script_path: Path) -> int:
+    """Extract the GPU count from #SBATCH --gres=gpu:N directives in a script."""
+    try:
+        text = script_path.read_text(encoding="utf-8")
+    except Exception:
+        return 1
+
+    pattern = re.compile(r"#SBATCH\s+--gres=gpu(?::[\w]+)?:(\d+)")
+    for line in text.splitlines():
+        match = pattern.search(line.strip())
+        if match:
+            return int(match.group(1))
+    return 1
+
+
+def queue_status(config: Config, partition: Optional[str] = None) -> str:
+    """Get the full cluster queue. Returns raw pipe-delimited squeue output."""
+    cmd: List[str] = [
+        "squeue",
+        "-o", r"%i|%u|%j|%T|%M|%l|%D|%C|%m|%R",
+        "--sort=P,t,-p",
+    ]
+    if partition:
+        cmd.extend(["-p", partition])
+
+    result = run_ssh(config, cmd, capture_output=True)
+    return result.stdout
