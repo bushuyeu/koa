@@ -329,11 +329,15 @@ def get_max_gpus_per_node(config: Config, partition: Optional[str] = None) -> Di
 def get_pending_gpu_counts(
     config: Config, partition: Optional[str] = None
 ) -> Dict[str, int]:
-    """Query squeue for pending jobs per GPU type. Returns {gpu_type: pending_job_count}."""
-    part = partition or config.default_partition or DEFAULT_PARTITION
+    """Query squeue for pending jobs per GPU type. Returns {gpu_type: pending_job_count}.
+
+    Counts pending jobs across ALL partitions because partitions share
+    physical GPUs — filtering by one partition underreports the real queue.
+    """
+    cmd = ["squeue", "-t", "PD", "-h", "-o", "%b"]
     result = run_ssh(
         config,
-        ["squeue", "-t", "PD", "-p", part, "-h", "-o", "%b"],
+        cmd,
         capture_output=True,
         check=False,
     )
