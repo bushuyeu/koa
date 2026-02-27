@@ -400,27 +400,11 @@ def select_best_gpu(
 
     pending = get_pending_gpu_counts(config, partition)
 
-    # Get actual GPU allocations to find truly free GPUs
-    usage = get_gpu_usage_per_node(config, partition)
-    total_used: Dict[str, int] = {}
-    for node_usage in usage.values():
-        for gpu_type, count in node_usage.items():
-            total_used[gpu_type] = total_used.get(gpu_type, 0) + count
-
-    # Compute actually free GPUs: total on idle/mix nodes minus allocated
-    actually_free: Dict[str, int] = {}
-    for g, total in available.items():
-        actually_free[g] = max(0, total - total_used.get(g, 0))
-
-    def _score(g: str) -> float:
-        free = actually_free.get(g, 0)
+    def _score(g: str) -> tuple:
+        # Sort by: zero queue first, then strongest chip
         pend = pending.get(g, 0)
         priority = GPU_PRIORITY.get(g, 0)
-        # Strongly prefer GPUs that are actually free right now
-        if free >= min_gpus:
-            return priority * 1000 + priority
-        # Fall back to queue-aware scoring for all-busy types
-        return priority / (1 + pend)
+        return (pend == 0, priority)
 
     return max(available, key=_score)
 

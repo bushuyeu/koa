@@ -64,8 +64,6 @@ def print_gpu_selection(
     from ..slurm import (
         GPU_PRIORITY,
         GPU_VRAM_GB,
-        get_available_gpus,
-        get_gpu_usage_per_node,
         get_max_gpus_per_node,
         get_pending_gpu_counts,
     )
@@ -73,30 +71,15 @@ def print_gpu_selection(
     console = console or Console()
     pending = get_pending_gpu_counts(config, partition)
     max_per_node = get_max_gpus_per_node(config, partition)
-    available = get_available_gpus(config, partition)
-
-    # Compute actually free GPUs per type
-    usage = get_gpu_usage_per_node(config, partition)
-    total_used: Dict[str, int] = {}
-    for node_usage in usage.values():
-        for g, c in node_usage.items():
-            total_used[g] = total_used.get(g, 0) + c
-    free_gpus: Dict[str, int] = {
-        g: max(0, total - total_used.get(g, 0))
-        for g, total in available.items()
-    }
 
     vram = GPU_VRAM_GB.get(gpu_type, 0)
-    free_count = free_gpus.get(gpu_type, 0)
     pending_count = pending.get(gpu_type, 0)
 
-    if free_count > 0:
-        status_tag = f"[green]({free_count} free)[/green]"
-    elif pending_count == 0:
-        status_tag = "[yellow](all busy, no queue)[/yellow]"
+    if pending_count == 0:
+        status_tag = "[green](no queue)[/green]"
     else:
         status_tag = (
-            f"[yellow](all busy, {pending_count} pending "
+            f"[yellow](queue: {pending_count} pending "
             f"job{'s' if pending_count != 1 else ''})[/yellow]"
         )
     console.print(
@@ -105,36 +88,34 @@ def print_gpu_selection(
     )
 
     # Build alternatives table
-    all_types = set(pending.keys()) | set(max_per_node.keys()) | set(available.keys())
+    all_types = set(pending.keys()) | set(max_per_node.keys())
     if not all_types:
         return
 
     table = Table(title="Available GPUs", show_lines=False, pad_edge=False)
     table.add_column("GPU", style="cyan")
     table.add_column("VRAM", justify="right")
-    table.add_column("Free", justify="right")
     table.add_column("Queue", justify="right")
     table.add_column("Max/Node", justify="right")
+    # Sort: zero queue first, then strongest chip
     for g in sorted(
         all_types,
-        key=lambda g: (free_gpus.get(g, 0) > 0, GPU_PRIORITY.get(g, 0)),
+        key=lambda g: (pending.get(g, 0) == 0, GPU_PRIORITY.get(g, 0)),
         reverse=True,
     ):
         g_vram = GPU_VRAM_GB.get(g, 0)
         g_max = max_per_node.get(g, 0)
         g_pending = pending.get(g, 0)
-        g_free = free_gpus.get(g, 0)
         marker = " [bold green]*[/bold green]" if g == gpu_type else ""
         fit_warn = "" if g_max >= gpus else " [red](< --gpus)[/red]"
-        free_str = (
-            f"[green]{g_free}[/green]" if g_free > 0
-            else "[dim]0[/dim]"
+        queue_str = (
+            "[green]no queue[/green]" if g_pending == 0
+            else f"[yellow]{g_pending} pending[/yellow]"
         )
         table.add_row(
             f"{g}{marker}",
             f"{g_vram}GB",
-            free_str,
-            f"{g_pending}" if g_pending else "[dim]0[/dim]",
+            queue_str,
             f"{g_max}{fit_warn}",
         )
     console.print(table)
@@ -158,9 +139,10 @@ def gpu_selection_json(
     max_per_node = get_max_gpus_per_node(config, partition)
 
     alternatives = []
+    # Sort: zero queue first, then strongest chip
     for g in sorted(
         set(pending.keys()) | set(max_per_node.keys()),
-        key=lambda g: GPU_PRIORITY.get(g, 0) / (1 + pending.get(g, 0)),
+        key=lambda g: (pending.get(g, 0) == 0, GPU_PRIORITY.get(g, 0)),
         reverse=True,
     ):
         alternatives.append({
@@ -168,7 +150,6 @@ def gpu_selection_json(
             "vram_gb": GPU_VRAM_GB.get(g, 0),
             "max_per_node": max_per_node.get(g, 0),
             "pending_jobs": pending.get(g, 0),
-            "score": round(GPU_PRIORITY.get(g, 0) / (1 + pending.get(g, 0)), 1),
             "fits_request": max_per_node.get(g, 0) >= gpus,
         })
 
