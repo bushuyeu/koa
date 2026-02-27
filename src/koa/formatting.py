@@ -156,16 +156,27 @@ def _format_memory(mem_mb_str: str) -> str:
     return f"{mb // 1000} GB"
 
 
-def format_availability_table(raw_output: str, partition: str | None = None) -> None:
+def format_availability_table(
+    raw_output: str,
+    partition: str | None = None,
+    gpu_usage: dict[str, dict[str, int]] | None = None,
+) -> None:
     """Print a Rich-formatted GPU/node availability table with a summary footer.
 
     Expects pipe-delimited sinfo output with columns:
     NODELIST|PARTITION|GRES|STATE|CPUS(A/I/O/T)|MEMORY
+
+    ``gpu_usage`` is an optional dict from ``get_gpu_usage_per_node()``
+    mapping ``{node: {gpu_type: allocated_count}}``.  When provided the
+    table shows exact free/used GPU counts instead of relying on the
+    (often misleading) SLURM node state.
     """
     lines = [line.strip() for line in raw_output.strip().splitlines() if line.strip()]
     if not lines:
         console.print("[dim]No nodes found.[/dim]")
         return
+
+    gpu_usage = gpu_usage or {}
 
     title = "GPU Availability"
     if partition:
@@ -187,7 +198,6 @@ def format_availability_table(raw_output: str, partition: str | None = None) -> 
         part = parts[1].strip().rstrip("*")
         gres_raw = parts[2].strip()
         state = parts[3].strip().rstrip("*")
-        cpus = parts[4].strip()
         memory = parts[5].strip()
 
         # Skip CPU-only nodes
@@ -195,12 +205,11 @@ def format_availability_table(raw_output: str, partition: str | None = None) -> 
             continue
 
         state_lower = state.lower()
-        is_idle = state_lower == "idle"
-        is_busy = state_lower in ("allocated", "alloc")
-        is_mixed = state_lower in ("mixed", "mix")
-        is_down = not (is_idle or is_busy or is_mixed)
+        is_down = state_lower not in (
+            "idle", "mixed", "mix", "allocated", "alloc",
+        )
 
-        # Count GPUs per type on this node
+        # Count total GPUs per type on this node
         from .slurm import GPU_NAME_MAP
         total_by_type: dict[str, int] = {}
         for entry in gres_raw.split(","):
@@ -217,29 +226,36 @@ def format_availability_table(raw_output: str, partition: str | None = None) -> 
             except ValueError:
                 pass
 
+        gpu_total = sum(total_by_type.values())
+        node_used = gpu_usage.get(node, {})
+        gpu_used = sum(node_used.values())
+        gpu_free = max(0, gpu_total - gpu_used)
+
         # Accumulate summary (once per physical node)
         if node not in seen_gpu_summary:
             seen_gpu_summary.add(node)
             for gpu_type, count in total_by_type.items():
                 if is_down:
                     summary[gpu_type]["offline"] += count
-                elif is_idle:
-                    summary[gpu_type]["free"] += count
-                elif is_busy:
-                    summary[gpu_type]["busy"] += count
-                else:  # mixed — some free, some busy
-                    summary[gpu_type]["busy"] += count
+                else:
+                    used = node_used.get(gpu_type, 0)
+                    free = max(0, count - used)
+                    summary[gpu_type]["busy"] += used
+                    summary[gpu_type]["free"] += free
 
-        # Build status label based on node state
+        # Build status label
         friendly = _friendly_gpu(gres_raw)
         if is_down:
             gpu_label = f"{friendly} [red](offline)[/red]"
-        elif is_busy:
-            gpu_label = f"{friendly} [red](all busy)[/red]"
-        elif is_idle:
-            gpu_label = f"{friendly} [green](free)[/green]"
-        else:  # mixed
-            gpu_label = f"{friendly} [yellow](partially busy)[/yellow]"
+        elif gpu_free == 0:
+            gpu_label = f"{friendly} [red](0 free)[/red]"
+        elif gpu_free == gpu_total:
+            gpu_label = f"{friendly} [green]({gpu_free} free)[/green]"
+        else:
+            gpu_label = (
+                f"{friendly} [green]({gpu_free} free)[/green]"
+                f" / [dim]{gpu_used} busy[/dim]"
+            )
 
         style = _NODE_STATE_STYLES.get(state_lower, "")
 

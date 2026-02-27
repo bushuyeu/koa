@@ -400,8 +400,27 @@ def select_best_gpu(
 
     pending = get_pending_gpu_counts(config, partition)
 
+    # Get actual GPU allocations to find truly free GPUs
+    usage = get_gpu_usage_per_node(config, partition)
+    total_used: Dict[str, int] = {}
+    for node_usage in usage.values():
+        for gpu_type, count in node_usage.items():
+            total_used[gpu_type] = total_used.get(gpu_type, 0) + count
+
+    # Compute actually free GPUs: total on idle/mix nodes minus allocated
+    actually_free: Dict[str, int] = {}
+    for g, total in available.items():
+        actually_free[g] = max(0, total - total_used.get(g, 0))
+
     def _score(g: str) -> float:
-        return GPU_PRIORITY.get(g, 0) / (1 + pending.get(g, 0))
+        free = actually_free.get(g, 0)
+        pend = pending.get(g, 0)
+        priority = GPU_PRIORITY.get(g, 0)
+        # Strongly prefer GPUs that are actually free right now
+        if free >= min_gpus:
+            return priority * 1000 + priority
+        # Fall back to queue-aware scoring for all-busy types
+        return priority / (1 + pend)
 
     return max(available, key=_score)
 
@@ -433,6 +452,55 @@ def queue_status(config: Config, partition: Optional[str] = None) -> str:
 
     result = run_ssh(config, cmd, capture_output=True)
     return result.stdout
+
+
+def get_gpu_usage_per_node(
+    config: Config, partition: Optional[str] = None
+) -> Dict[str, Dict[str, int]]:
+    """Query sinfo for allocated GPUs per node.
+
+    Uses ``sinfo --Format=GresUsed`` which reports actual GPU allocations,
+    unlike node state which only reflects CPU-level usage.
+
+    Returns ``{node_name: {gpu_type: allocated_count}}``.
+    """
+    cmd: List[str] = [
+        "sinfo", "-N",
+        "-O", "NodeHost:30,GresUsed:80",
+        "--noheader",
+    ]
+    if partition:
+        cmd.extend(["-p", partition])
+
+    result = run_ssh(config, cmd, capture_output=True, check=False)
+    if not result.stdout:
+        return {}
+
+    usage: Dict[str, Dict[str, int]] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        node = parts[0].strip()
+        if node in usage:
+            continue  # already seen (appears once per partition)
+        gres_used = parts[1].strip()
+        node_usage: Dict[str, int] = {}
+        for entry in gres_used.split(","):
+            entry = entry.strip()
+            if not entry.startswith("gpu:"):
+                continue
+            segments = entry.split(":")
+            if len(segments) < 3:
+                continue
+            gpu_name = GPU_NAME_MAP.get(segments[1].lower(), segments[1].lower())
+            count_str = segments[2].split("(")[0]
+            try:
+                node_usage[gpu_name] = node_usage.get(gpu_name, 0) + int(count_str)
+            except ValueError:
+                pass
+        usage[node] = node_usage
+    return usage
 
 
 def get_cluster_availability(config: Config, partition: Optional[str] = None) -> str:
