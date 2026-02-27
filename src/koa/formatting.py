@@ -145,6 +145,17 @@ def _friendly_gpu(gres: str) -> str:
     return ", ".join(parts_list) if parts_list else gres
 
 
+def _format_memory(mem_mb_str: str) -> str:
+    """Convert memory in MB (e.g. '257000') to human-readable (e.g. '257 GB')."""
+    try:
+        mb = int(mem_mb_str)
+    except ValueError:
+        return mem_mb_str
+    if mb >= 1_000_000:
+        return f"{mb / 1_000_000:.1f} TB"
+    return f"{mb // 1000} GB"
+
+
 def format_availability_table(raw_output: str, partition: str | None = None) -> None:
     """Print a Rich-formatted GPU/node availability table with a summary footer.
 
@@ -156,20 +167,16 @@ def format_availability_table(raw_output: str, partition: str | None = None) -> 
         console.print("[dim]No nodes found.[/dim]")
         return
 
-    title = "GPU Node Availability"
+    title = "GPU Availability"
     if partition:
         title += f" ({partition})"
 
-    table = Table(title=title, show_lines=False)
-    table.add_column("NODE", style="cyan", no_wrap=True)
-    table.add_column("PARTITION")
-    table.add_column("GPUs")
-    table.add_column("STATE")
-    table.add_column("CPUs (A/I/O/T)", justify="right")
-    table.add_column("MEMORY", justify="right")
-
-    # Track GPU summary: {gpu_type: {state_bucket: count}}
+    # Track GPU summary: {gpu_type: {"free": N, "busy": N, "offline": N}}
     summary: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    # Deduplicate: merge partitions per node
+    node_info: dict[str, dict] = {}
+    seen_gpu_summary: set[str] = set()
 
     for line in lines:
         parts = line.split("|")
@@ -183,18 +190,19 @@ def format_availability_table(raw_output: str, partition: str | None = None) -> 
         cpus = parts[4].strip()
         memory = parts[5].strip()
 
+        # Skip CPU-only nodes
+        if gres_raw in ("(null)", "(N/A)", "") or "gpu:" not in gres_raw:
+            continue
+
         state_lower = state.lower()
-        style = _NODE_STATE_STYLES.get(state_lower, "")
+        is_idle = state_lower == "idle"
+        is_busy = state_lower in ("allocated", "alloc")
+        is_mixed = state_lower in ("mixed", "mix")
+        is_down = not (is_idle or is_busy or is_mixed)
 
-        # Determine state bucket for summary
-        if state_lower in ("idle",):
-            bucket = "idle"
-        elif state_lower in ("mixed", "mix", "allocated", "alloc"):
-            bucket = "mixed"
-        else:
-            bucket = "down"
-
-        # Accumulate GPU counts for summary
+        # Count GPUs per type on this node
+        from .slurm import GPU_NAME_MAP
+        total_by_type: dict[str, int] = {}
         for entry in gres_raw.split(","):
             entry = entry.strip()
             if not entry.startswith("gpu:"):
@@ -202,22 +210,64 @@ def format_availability_table(raw_output: str, partition: str | None = None) -> 
             segments = entry.split(":")
             if len(segments) < 3:
                 continue
-            from .slurm import GPU_NAME_MAP
             gpu_name = GPU_NAME_MAP.get(segments[1].lower(), segments[1].lower())
             count_str = segments[2].split("(")[0]
             try:
-                count = int(count_str)
+                total_by_type[gpu_name] = total_by_type.get(gpu_name, 0) + int(count_str)
             except ValueError:
-                continue
-            summary[gpu_name][bucket] += count
+                pass
 
-        friendly_gres = _friendly_gpu(gres_raw)
+        # Accumulate summary (once per physical node)
+        if node not in seen_gpu_summary:
+            seen_gpu_summary.add(node)
+            for gpu_type, count in total_by_type.items():
+                if is_down:
+                    summary[gpu_type]["offline"] += count
+                elif is_idle:
+                    summary[gpu_type]["free"] += count
+                elif is_busy:
+                    summary[gpu_type]["busy"] += count
+                else:  # mixed — some free, some busy
+                    summary[gpu_type]["busy"] += count
 
-        # Skip CPU-only nodes (no GPUs)
-        if gres_raw in ("(null)", "(N/A)", "") or "gpu:" not in gres_raw:
-            continue
+        # Build status label based on node state
+        friendly = _friendly_gpu(gres_raw)
+        if is_down:
+            gpu_label = f"{friendly} [red](offline)[/red]"
+        elif is_busy:
+            gpu_label = f"{friendly} [red](all busy)[/red]"
+        elif is_idle:
+            gpu_label = f"{friendly} [green](free)[/green]"
+        else:  # mixed
+            gpu_label = f"{friendly} [yellow](partially busy)[/yellow]"
 
-        table.add_row(node, part, friendly_gres, state, cpus, memory, style=style)
+        style = _NODE_STATE_STYLES.get(state_lower, "")
+
+        # Merge partitions for the same node
+        if node in node_info:
+            node_info[node]["partitions"].append(part)
+        else:
+            node_info[node] = {
+                "partitions": [part],
+                "gpu_label": gpu_label,
+                "memory": memory,
+                "style": style,
+            }
+
+    table = Table(title=title, show_lines=False)
+    table.add_column("NODE", style="cyan", no_wrap=True)
+    table.add_column("PARTITIONS")
+    table.add_column("GPUs")
+    table.add_column("MEMORY", justify="right")
+
+    for node, info in node_info.items():
+        table.add_row(
+            node,
+            ", ".join(info["partitions"]),
+            info["gpu_label"],
+            _format_memory(info["memory"]),
+            style=info["style"],
+        )
 
     console.print(table)
 
@@ -227,16 +277,22 @@ def format_availability_table(raw_output: str, partition: str | None = None) -> 
         sum_table = Table(title="GPU Summary", show_lines=False)
         sum_table.add_column("GPU Type", style="bold")
         sum_table.add_column("Free", style="green", justify="right")
-        sum_table.add_column("In Use", style="yellow", justify="right")
+        sum_table.add_column("Busy", style="yellow", justify="right")
         sum_table.add_column("Offline", style="red", justify="right")
         sum_table.add_column("Total", justify="right")
 
-        for gpu_type in sorted(summary, key=lambda g: (-sum(summary[g].values()), g)):
-            buckets = summary[gpu_type]
-            free = buckets.get("idle", 0)
-            in_use = buckets.get("mixed", 0)
-            offline = buckets.get("down", 0)
-            total = free + in_use + offline
-            sum_table.add_row(gpu_type, str(free), str(in_use), str(offline), str(total))
+        for gpu_type in sorted(summary, key=lambda g: (-summary[g].get("free", 0), g)):
+            s = summary[gpu_type]
+            free = s.get("free", 0)
+            busy = s.get("busy", 0)
+            offline = s.get("offline", 0)
+            total = free + busy + offline
+            sum_table.add_row(
+                gpu_type,
+                str(free) if free else "[dim]0[/dim]",
+                str(busy) if busy else "[dim]0[/dim]",
+                str(offline) if offline else "[dim]0[/dim]",
+                str(total),
+            )
 
         console.print(sum_table)

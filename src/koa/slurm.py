@@ -436,7 +436,10 @@ def queue_status(config: Config, partition: Optional[str] = None) -> str:
 
 
 def get_cluster_availability(config: Config, partition: Optional[str] = None) -> str:
-    """Query sinfo for per-node GPU inventory. Returns raw pipe-delimited output."""
+    """Query sinfo for per-node GPU inventory. Returns raw pipe-delimited output.
+
+    Format: NODELIST|PARTITION|GRES|STATE|CPUS(A/I/O/T)|MEMORY
+    """
     cmd: List[str] = [
         "sinfo",
         "-N",

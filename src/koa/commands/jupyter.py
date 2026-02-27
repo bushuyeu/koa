@@ -7,7 +7,6 @@ import secrets
 import signal
 import socket
 import subprocess
-import sys
 import time
 from typing import Optional
 
@@ -257,7 +256,6 @@ def handle(args, config: Config) -> int:
         console.print(
             f"[red]Port {local_port} is already in use.[/red] "
             f"Try --port {local_port + 1}",
-            file=sys.stderr,
         )
         return 1
 
@@ -292,7 +290,7 @@ def handle(args, config: Config) -> int:
             capture_output=True,
         )
     except SSHError as exc:
-        console.print(f"[red]Failed to write remote script:[/red] {exc}", file=sys.stderr)
+        console.print(f"[red]Failed to write remote script:[/red] {exc}")
         return 1
 
     # 5. Submit the job
@@ -317,7 +315,7 @@ def handle(args, config: Config) -> int:
         output = (result.stdout or "").strip()
         match = SBATCH_JOB_ID_PATTERN.search(output)
         if not match:
-            console.print(f"[red]Failed to parse job ID:[/red] {output}", file=sys.stderr)
+            console.print(f"[red]Failed to parse job ID:[/red] {output}")
             _cleanup(config, None, None, remote_script)
             return 1
         job_id = match.group(1)
@@ -346,7 +344,6 @@ def handle(args, config: Config) -> int:
             stderr = (tunnel.stderr.read() or b"").decode(errors="replace")
             console.print(
                 f"[red]SSH tunnel failed to start.[/red]\n{stderr}",
-                file=sys.stderr,
             )
             _cleanup(config, job_id, None, remote_script)
             return 1
@@ -382,11 +379,11 @@ def handle(args, config: Config) -> int:
     except KeyboardInterrupt:
         console.print("\n[bold]Interrupted.[/bold]")
     except TimeoutError as exc:
-        console.print(f"\n[red]{exc}[/red]", file=sys.stderr)
+        console.print(f"\n[red]{exc}[/red]")
     except SSHError as exc:
-        console.print(f"\n[red]SSH error:[/red] {exc}", file=sys.stderr)
+        console.print(f"\n[red]SSH error:[/red] {exc}")
     except RuntimeError as exc:
-        console.print(f"\n[red]{exc}[/red]", file=sys.stderr)
+        console.print(f"\n[red]{exc}[/red]")
     finally:
         console.print("Cleaning up...")
         _cleanup(config, job_id, tunnel, remote_script)
