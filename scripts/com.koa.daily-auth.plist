@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.koa.daily-auth</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>PLACEHOLDER_SCRIPT_PATH</string>
+        <string>--auto</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>12</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>PLACEHOLDER_LOG_PATH</string>
+
+    <key>StandardErrorPath</key>
+    <string>PLACEHOLDER_LOG_PATH</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

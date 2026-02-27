@@ -1,0 +1,19 @@
+# Add this block to ~/.ssh/config for SSH multiplexing with KOA.
+# It keeps a single master connection alive for 25 hours so you only
+# authenticate (DUO 2FA) once per day.
+#
+# If you already have a "Host koa" block, merge these options into it.
+# The critical settings are ControlMaster, ControlPath, and ControlPersist.
+
+Host koa koa.its.hawaii.edu
+    HostName koa.its.hawaii.edu
+    User <your-UH-username>
+    IdentityFile ~/.ssh/id_ed25519_koa
+    IdentitiesOnly yes
+    AddKeysToAgent yes
+    UseKeychain yes
+    ControlMaster auto
+    ControlPath ~/.ssh/control-%r@%h:%p
+    ControlPersist 25h
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
