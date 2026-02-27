@@ -74,15 +74,18 @@ conda activate {conda_env}
 
 
 def _get_job_queue_position(
-    config: Config, job_id: str, partition: Optional[str] = None
+    config: Config,
+    job_id: str,
+    partition: Optional[str] = None,
+    gpu_type: Optional[str] = None,
 ) -> Optional[int]:
     """Return the 1-indexed queue position for a pending job, or None.
 
-    Filters by partition so the position reflects the relevant queue,
-    not the global cluster-wide pending list.
+    Filters by partition and GPU type so the position reflects how many
+    people are ahead of you for the *same resource*, not the global queue.
     """
     try:
-        cmd = ["squeue", "-t", "PD", "--sort=p,i", "-o", "%i", "--noheader"]
+        cmd = ["squeue", "-t", "PD", "--sort=p,i", "-o", "%i|%b", "--noheader"]
         if partition:
             cmd.extend(["-p", partition])
         result = run_ssh(
@@ -93,8 +96,16 @@ def _get_job_queue_position(
         )
         if result.returncode != 0:
             return None
-        for pos, line in enumerate(result.stdout.strip().splitlines(), 1):
-            if line.strip() == str(job_id):
+        pos = 0
+        for line in result.stdout.strip().splitlines():
+            parts = line.split("|", 1)
+            jid = parts[0].strip()
+            gres = parts[1].strip() if len(parts) > 1 else ""
+            # Skip jobs requesting a different GPU type
+            if gpu_type and gpu_type.lower() not in gres.lower():
+                continue
+            pos += 1
+            if jid == str(job_id):
                 return pos
         return None
     except SSHError:
@@ -105,6 +116,7 @@ def _wait_for_running(
     config: Config,
     job_id: str,
     partition: Optional[str] = None,
+    gpu_type: Optional[str] = None,
     timeout: int = POLL_TIMEOUT,
 ) -> str:
     """Poll squeue until the job is RUNNING. Returns the node name.
@@ -133,7 +145,9 @@ def _wait_for_running(
                 if state in ("FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL"):
                     raise RuntimeError(f"Job {job_id} entered state {state}")
                 if state == "PENDING":
-                    pos = _get_job_queue_position(config, job_id, partition)
+                    pos = _get_job_queue_position(
+                        config, job_id, partition, gpu_type
+                    )
                     if pos is not None:
                         status.update(
                             f"[bold]Waiting for job {job_id}...[/bold] "
@@ -322,7 +336,9 @@ def handle(args, config: Config) -> int:
         console.print(f"Job [bold]{job_id}[/bold] submitted.")
 
         # 6. Poll until running
-        node = _wait_for_running(config, job_id, partition=partition)
+        node = _wait_for_running(
+            config, job_id, partition=partition, gpu_type=gpu_type
+        )
         console.print(f"Job [bold]{job_id}[/bold] running on [bold cyan]{node}[/bold cyan].")
 
         # 7. Open SSH tunnel
