@@ -1141,13 +1141,13 @@ def _queue(args: argparse.Namespace, config: Config) -> int:
 
 def _availability(args: argparse.Namespace, config: Config) -> int:
     from .formatting import format_availability_table
-    from .slurm import get_gpu_usage_per_node
+    from .slurm import get_pending_gpu_counts
 
     partition = getattr(args, "partition", None)
     raw = get_cluster_availability(config, partition=partition)
-    gpu_usage = get_gpu_usage_per_node(config, partition=partition)
+    pending = get_pending_gpu_counts(config, partition=partition)
     if raw and raw.strip():
-        format_availability_table(raw, partition=partition, gpu_usage=gpu_usage)
+        format_availability_table(raw, partition=partition, pending=pending)
     else:
         print("No node data available.")
     return 0
