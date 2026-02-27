@@ -326,41 +326,72 @@ def get_max_gpus_per_node(config: Config, partition: Optional[str] = None) -> Di
     return max_per_node
 
 
+def _parse_gres_gpu_counts(lines: str) -> Dict[str, int]:
+    """Parse squeue GRES output lines into {gpu_type: device_count}.
+
+    Each line is a GRES field like ``gpu:NV-A30:2`` — the trailing number
+    is the device count requested by that job.
+    """
+    counts: Dict[str, int] = {}
+    for line in lines.splitlines():
+        line = line.strip()
+        if not line or "gpu:" not in line:
+            continue
+        gpu_part = line[line.index("gpu:"):]
+        gres_parts = gpu_part.split(":")
+        if len(gres_parts) < 3:
+            continue
+        gpu_name = gres_parts[1]
+        count_str = gres_parts[2].split("(")[0]
+        try:
+            n = int(count_str)
+        except ValueError:
+            n = 1
+        normalized = GPU_NAME_MAP.get(gpu_name.lower(), gpu_name)
+        counts[normalized] = counts.get(normalized, 0) + n
+    return counts
+
+
 def get_pending_gpu_counts(
     config: Config, partition: Optional[str] = None
 ) -> Dict[str, int]:
-    """Query squeue for pending jobs per GPU type. Returns {gpu_type: pending_job_count}.
-
-    Counts pending jobs across ALL partitions because partitions share
-    physical GPUs — filtering by one partition underreports the real queue.
-    """
-    cmd = ["squeue", "-t", "PD", "-h", "-o", "%b"]
+    """Pending GPU devices per type (cluster-wide). Returns {gpu_type: device_count}."""
     result = run_ssh(
         config,
-        cmd,
+        ["squeue", "-t", "PD", "-h", "-o", "%b"],
         capture_output=True,
         check=False,
     )
     if result.returncode != 0:
         return {}
+    return _parse_gres_gpu_counts(result.stdout)
 
-    pending: Dict[str, int] = {}
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # Parse GRES like "gpu:NV-A30:1" or "gres/gpu:NV-A30:1"
-        if "gpu:" not in line:
-            continue
-        gpu_part = line[line.index("gpu:") :]
-        gres_parts = gpu_part.split(":")
-        if len(gres_parts) < 3:
-            continue
-        gpu_name = gres_parts[1]
-        normalized = GPU_NAME_MAP.get(gpu_name.lower(), gpu_name)
-        pending[normalized] = pending.get(normalized, 0) + 1
 
-    return pending
+def get_running_gpu_counts(
+    config: Config, partition: Optional[str] = None
+) -> Dict[str, int]:
+    """Running (allocated) GPU devices per type (cluster-wide). Returns {gpu_type: device_count}."""
+    result = run_ssh(
+        config,
+        ["squeue", "-t", "R", "-h", "-o", "%b"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return {}
+    return _parse_gres_gpu_counts(result.stdout)
+
+
+def get_free_gpu_counts(
+    config: Config, partition: Optional[str] = None
+) -> Dict[str, int]:
+    """Free (unallocated) GPU devices per type. Returns {gpu_type: free_count}."""
+    total = get_available_gpus(config, partition)
+    running = get_running_gpu_counts(config, partition)
+    free: Dict[str, int] = {}
+    for g, t in total.items():
+        free[g] = max(0, t - running.get(g, 0))
+    return free
 
 
 def select_best_gpu(
@@ -372,16 +403,16 @@ def select_best_gpu(
 ) -> str:
     """Select the GPU that will be quickest to allocate, then strongest.
 
-    Scores by contention ratio: pending_jobs / total_gpus.
-    Lower contention = faster allocation.  Among equal contention,
-    the strongest chip (highest GPU_PRIORITY) wins.
+    Scoring (highest wins):
+      1. Has free GPUs right now? (instant allocation)
+      2. Lowest contention: (pending + 1) / total_gpus
+         The +1 accounts for YOUR job joining the queue.
+      3. Highest GPU priority (chip strength)
 
-    Example: H200 (4 GPUs, 0 pending) beats H100 (1 GPU, 2 pending)
-    because contention is 0.0 vs 2.0.  Among two zero-queue types,
-    H200 beats RTX2080Ti because it has higher priority.
-
-    When min_gpus > 1, GPU types that have fewer than min_gpus per node
-    are filtered out (can't satisfy the request on a single node).
+    Example with your cluster:
+      RTX2080Ti: 10 free, 0 pending → instant, picked if strongest free
+      H200:       0 free, 0 pending → contention (0+1)/4 = 0.25
+      H100:       0 free, 2 pending → contention (2+1)/1 = 3.0
 
     Returns the GRES GPU type name (e.g. 'nvidia_h200_nvl', 'NV-A30').
     Falls back to 'NV-RTX2080Ti' if nothing is detected.
@@ -404,15 +435,17 @@ def select_best_gpu(
         return max(available, key=lambda g: GPU_PRIORITY.get(g, 0))
 
     pending = get_pending_gpu_counts(config, partition)
+    free = get_free_gpu_counts(config, partition)
 
     def _score(g: str) -> tuple:
-        # Contention = pending / total_gpus (lower = faster to get)
+        f = free.get(g, 0)
         total = available.get(g, 1)
         pend = pending.get(g, 0)
-        contention = pend / total
+        # (pending + 1) because you're joining the queue too
+        contention = (pend + 1) / total
         priority = GPU_PRIORITY.get(g, 0)
-        # Maximize: (-contention, priority)
-        return (-contention, priority)
+        # has_free first (instant allocation), then lowest contention, then strongest
+        return (f > 0, -contention, priority)
 
     return max(available, key=_score)
 

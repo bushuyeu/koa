@@ -65,6 +65,7 @@ def print_gpu_selection(
         GPU_PRIORITY,
         GPU_VRAM_GB,
         get_available_gpus,
+        get_free_gpu_counts,
         get_max_gpus_per_node,
         get_pending_gpu_counts,
     )
@@ -73,17 +74,18 @@ def print_gpu_selection(
     pending = get_pending_gpu_counts(config, partition)
     max_per_node = get_max_gpus_per_node(config, partition)
     total_gpus = get_available_gpus(config, partition)
+    free_gpus = get_free_gpu_counts(config, partition)
 
     vram = GPU_VRAM_GB.get(gpu_type, 0)
+    free_count = free_gpus.get(gpu_type, 0)
     pending_count = pending.get(gpu_type, 0)
 
-    if pending_count == 0:
-        status_tag = "[green](no queue)[/green]"
+    if free_count > 0:
+        status_tag = f"[green]({free_count} free)[/green]"
+    elif pending_count > 0:
+        status_tag = f"[yellow](busy, {pending_count} waiting)[/yellow]"
     else:
-        status_tag = (
-            f"[yellow](queue: {pending_count} pending "
-            f"job{'s' if pending_count != 1 else ''})[/yellow]"
-        )
+        status_tag = "[yellow](busy)[/yellow]"
     console.print(
         f"Selected GPU: [bold cyan]{gpu_type}[/bold cyan] "
         f"({vram}GB VRAM) {status_tag}"
@@ -96,32 +98,39 @@ def print_gpu_selection(
 
     def _contention(g: str) -> float:
         total = total_gpus.get(g, 1)
-        return pending.get(g, 0) / total
+        return (pending.get(g, 0) + 1) / total
 
     table = Table(title="Available GPUs", show_lines=False, pad_edge=False)
     table.add_column("GPU", style="cyan")
     table.add_column("VRAM", justify="right")
-    table.add_column("Queue", justify="right")
+    table.add_column("Free", justify="right")
+    table.add_column("Waiting", justify="right")
     table.add_column("Max/Node", justify="right")
-    # Sort: lowest contention first, then strongest chip
+    # Sort: has free GPUs first, then lowest contention, then strongest chip
     for g in sorted(
         all_types,
-        key=lambda g: (-_contention(g), GPU_PRIORITY.get(g, 0)),
+        key=lambda g: (free_gpus.get(g, 0) > 0, -_contention(g), GPU_PRIORITY.get(g, 0)),
         reverse=True,
     ):
         g_vram = GPU_VRAM_GB.get(g, 0)
         g_max = max_per_node.get(g, 0)
+        g_free = free_gpus.get(g, 0)
         g_pending = pending.get(g, 0)
         marker = " [bold green]*[/bold green]" if g == gpu_type else ""
         fit_warn = "" if g_max >= gpus else " [red](< --gpus)[/red]"
-        queue_str = (
-            "[green]no queue[/green]" if g_pending == 0
-            else f"[yellow]{g_pending} pending[/yellow]"
+        free_str = (
+            f"[green]{g_free}[/green]" if g_free > 0
+            else "[red]0[/red]"
+        )
+        wait_str = (
+            f"[yellow]{g_pending}[/yellow]" if g_pending > 0
+            else "[dim]0[/dim]"
         )
         table.add_row(
             f"{g}{marker}",
             f"{g_vram}GB",
-            queue_str,
+            free_str,
+            wait_str,
             f"{g_max}{fit_warn}",
         )
     console.print(table)
@@ -138,6 +147,7 @@ def gpu_selection_json(
         GPU_PRIORITY,
         GPU_VRAM_GB,
         get_available_gpus,
+        get_free_gpu_counts,
         get_max_gpus_per_node,
         get_pending_gpu_counts,
     )
@@ -145,22 +155,23 @@ def gpu_selection_json(
     pending = get_pending_gpu_counts(config, partition)
     max_per_node = get_max_gpus_per_node(config, partition)
     total_gpus = get_available_gpus(config, partition)
+    free_gpus = get_free_gpu_counts(config, partition)
 
     def _contention(g: str) -> float:
         total = total_gpus.get(g, 1)
-        return pending.get(g, 0) / total
+        return (pending.get(g, 0) + 1) / total
 
     alternatives = []
-    # Sort: lowest contention first, then strongest chip
     for g in sorted(
         set(pending.keys()) | set(max_per_node.keys()),
-        key=lambda g: (-_contention(g), GPU_PRIORITY.get(g, 0)),
+        key=lambda g: (free_gpus.get(g, 0) > 0, -_contention(g), GPU_PRIORITY.get(g, 0)),
         reverse=True,
     ):
         alternatives.append({
             "gpu_type": g,
             "vram_gb": GPU_VRAM_GB.get(g, 0),
             "max_per_node": max_per_node.get(g, 0),
+            "free_gpus": free_gpus.get(g, 0),
             "pending_jobs": pending.get(g, 0),
             "total_gpus": total_gpus.get(g, 0),
             "contention": round(_contention(g), 2),
@@ -170,6 +181,7 @@ def gpu_selection_json(
     return {
         "selected_gpu": gpu_type,
         "vram_gb": GPU_VRAM_GB.get(gpu_type, 0),
+        "free_gpus": free_gpus.get(gpu_type, 0),
         "pending_jobs": pending.get(gpu_type, 0),
         "alternatives": alternatives,
     }

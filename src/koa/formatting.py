@@ -160,13 +160,15 @@ def format_availability_table(
     raw_output: str,
     partition: str | None = None,
     pending: dict[str, int] | None = None,
+    free: dict[str, int] | None = None,
 ) -> None:
     """Print a Rich-formatted GPU/node availability table with a summary footer.
 
     Expects pipe-delimited sinfo output with columns:
     NODELIST|PARTITION|GRES|STATE|CPUS(A/I/O/T)|MEMORY
 
-    ``pending`` maps ``{gpu_type: pending_job_count}`` from squeue.
+    ``pending`` maps ``{gpu_type: pending_device_count}`` from squeue.
+    ``free`` maps ``{gpu_type: free_device_count}`` (total - running).
     """
     lines = [line.strip() for line in raw_output.strip().splitlines() if line.strip()]
     if not lines:
@@ -174,12 +176,13 @@ def format_availability_table(
         return
 
     pending = pending or {}
+    free = free or {}
 
     title = "GPU Availability"
     if partition:
         title += f" ({partition})"
 
-    # Track GPU totals: {gpu_type: {"available": N, "offline": N}}
+    # Track GPU totals: {gpu_type: {"total": N, "offline": N}}
     summary: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
 
     # Deduplicate: merge partitions per node
@@ -230,22 +233,23 @@ def format_availability_table(
                 if is_down:
                     summary[gpu_type]["offline"] += count
                 else:
-                    summary[gpu_type]["available"] += count
+                    summary[gpu_type]["total"] += count
 
-        # Build GPU label with queue info
+        # Build GPU label with free/queue info
         friendly = _friendly_gpu(gres_raw)
-        # Get the queue for the first GPU type on this node
         node_gpu_types = list(total_by_type.keys())
-        node_queue = max((pending.get(g, 0) for g in node_gpu_types), default=0)
 
         if is_down:
             gpu_label = f"{friendly} [red](offline)[/red]"
-        elif node_queue == 0:
-            gpu_label = f"{friendly} [green](no queue)[/green]"
         else:
-            gpu_label = (
-                f"{friendly} [yellow](queue: {node_queue})[/yellow]"
-            )
+            node_free = max((free.get(g, 0) for g in node_gpu_types), default=0)
+            node_pending = max((pending.get(g, 0) for g in node_gpu_types), default=0)
+            if node_free > 0:
+                gpu_label = f"{friendly} [green]({node_free} free)[/green]"
+            elif node_pending > 0:
+                gpu_label = f"{friendly} [yellow](busy, {node_pending} waiting)[/yellow]"
+            else:
+                gpu_label = f"{friendly} [yellow](busy)[/yellow]"
 
         style = _NODE_STATE_STYLES.get(state_lower, "")
 
@@ -282,26 +286,31 @@ def format_availability_table(
         console.print()
         sum_table = Table(title="GPU Summary", show_lines=False)
         sum_table.add_column("GPU Type", style="bold")
-        sum_table.add_column("Queue", justify="right")
-        sum_table.add_column("GPUs", justify="right")
-        sum_table.add_column("Offline", style="red", justify="right")
+        sum_table.add_column("Free", justify="right")
+        sum_table.add_column("Waiting", justify="right")
+        sum_table.add_column("Total", justify="right")
 
         def _contention(g: str) -> float:
-            total = summary[g].get("available", 1) or 1
-            return pending.get(g, 0) / total
+            total = summary[g].get("total", 1) or 1
+            return (pending.get(g, 0) + 1) / total
 
         for gpu_type in sorted(summary, key=lambda g: (_contention(g), g)):
             s = summary[gpu_type]
-            available = s.get("available", 0)
+            total = s.get("total", 0)
             offline = s.get("offline", 0)
-            q = pending.get(gpu_type, 0)
             # Skip GPU types that are entirely offline
-            if available == 0:
+            if total == 0:
                 continue
-            queue_str = (
-                "[green]no queue[/green]" if q == 0
-                else f"[yellow]{q} pending[/yellow]"
+            f = free.get(gpu_type, 0)
+            q = pending.get(gpu_type, 0)
+            free_str = (
+                f"[green]{f} free[/green]" if f > 0
+                else "[red]0[/red]"
             )
-            sum_table.add_row(gpu_type, queue_str, str(available), "[dim]0[/dim]")
+            wait_str = (
+                f"[yellow]{q} pending[/yellow]" if q > 0
+                else "[dim]0[/dim]"
+            )
+            sum_table.add_row(gpu_type, free_str, wait_str, str(total))
 
         console.print(sum_table)
