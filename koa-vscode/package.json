@@ -1,0 +1,78 @@
+{
+  "name": "koa-vscode",
+  "displayName": "KOA HPC Kernels",
+  "description": "Connect VS Code notebooks to SLURM HPC GPUs via KOA",
+  "version": "0.1.0",
+  "publisher": "koa",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Notebooks"
+  ],
+  "activationEvents": [
+    "onNotebook:jupyter-notebook",
+    "onNotebook:interactive"
+  ],
+  "extensionDependencies": [
+    "ms-toolsai.jupyter"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "KOA",
+      "properties": {
+        "koa.cliPath": {
+          "type": "string",
+          "default": "koa",
+          "description": "Path to the koa CLI binary"
+        },
+        "koa.defaultWalltime": {
+          "type": "string",
+          "default": "04:00:00",
+          "description": "Default walltime for Jupyter sessions"
+        },
+        "koa.defaultMemory": {
+          "type": "string",
+          "default": "16G",
+          "description": "Default memory allocation"
+        },
+        "koa.allocationTimeoutMinutes": {
+          "type": "number",
+          "default": 60,
+          "description": "Max minutes to wait for SLURM allocation"
+        },
+        "koa.condaEnv": {
+          "type": "string",
+          "default": "",
+          "description": "Conda environment to activate on the remote node"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "koa.showSessions",
+        "title": "KOA: Show Active Sessions"
+      },
+      {
+        "command": "koa.killSession",
+        "title": "KOA: Terminate Session"
+      },
+      {
+        "command": "koa.openWebUI",
+        "title": "KOA: Open Jupyter in Browser"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -b",
+    "watch": "tsc -b --watch",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.100.0",
+    "@vscode/jupyter-extension": "^1.1.1",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1141,12 +1141,40 @@ def _queue(args: argparse.Namespace, config: Config) -> int:
 
 def _availability(args: argparse.Namespace, config: Config) -> int:
     from .formatting import format_availability_table
-    from .slurm import get_free_gpu_counts, get_pending_gpu_counts
+    from .slurm import (
+        GPU_PRIORITY,
+        GPU_VRAM_GB,
+        get_available_gpus,
+        get_free_gpu_counts,
+        get_max_gpus_per_node,
+        get_pending_gpu_counts,
+    )
 
     partition = getattr(args, "partition", None)
-    raw = get_cluster_availability(config, partition=partition)
     pending = get_pending_gpu_counts(config, partition=partition)
     free = get_free_gpu_counts(config, partition=partition)
+
+    if getattr(args, "output_format", "table") == "json":
+        total = get_available_gpus(config, partition=partition)
+        max_per_node = get_max_gpus_per_node(config, partition=partition)
+        all_types = set(total.keys()) | set(pending.keys()) | set(free.keys())
+        gpus = []
+        for g in sorted(
+            all_types, key=lambda g: GPU_PRIORITY.get(g, 0), reverse=True
+        ):
+            gpus.append({
+                "gpu_type": g,
+                "vram_gb": GPU_VRAM_GB.get(g, 0),
+                "free": free.get(g, 0),
+                "pending": pending.get(g, 0),
+                "total": total.get(g, 0),
+                "max_per_node": max_per_node.get(g, 0),
+            })
+        json.dump({"gpus": gpus}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    raw = get_cluster_availability(config, partition=partition)
     if raw and raw.strip():
         format_availability_table(raw, partition=partition, pending=pending, free=free)
     else:
