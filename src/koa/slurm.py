@@ -12,35 +12,38 @@ SBATCH_JOB_ID_PATTERN = re.compile(r"Submitted batch job (\d+)")
 DEFAULT_PARTITION = "kill-shared"
 
 # GPU priority ranking — higher score = more desirable
+# Based on actual KOA cluster inventory (sinfo output)
 GPU_PRIORITY: Dict[str, int] = {
-    "h200": 110,
-    "h100": 100,
-    "a100": 90,
-    "a40": 80,
-    "l40": 75,
-    "a30": 70,
-    "v100": 60,
-    "rtx_a6000": 55,
-    "rtx_a5000": 50,
-    "rtx2080ti": 40,
-    "t4": 30,
+    "nvidia_h200_nvl": 110,       # Hopper, 141GB HBM3e
+    "nvidia_h100_nvl": 105,       # Hopper, 94GB HBM3
+    "nvidia_h100_pcie": 100,      # Hopper, 80GB HBM3
+    "NV-H100": 100,               # Hopper
+    "NV-L40": 85,                 # Ada Lovelace, 48GB GDDR6
+    "NV-A30": 75,                 # Ampere, 24GB HBM2
+    "nvidia_a30_2g.12gb": 65,     # A30 MIG 2g slice, 12GB
+    "NV-V100-SXM2": 60,           # Volta, 32GB HBM2
+    "NV-RTX-A4000": 50,           # Ampere, 16GB GDDR6
+    "NV-RTX5000": 45,             # Turing, 16GB GDDR6
+    "NV-RTX2080Ti": 35,           # Turing, 11GB GDDR6
+    "NV-RTX2070": 25,             # Turing, 8GB GDDR6
+    "nvidia_a30_1g.6gb": 20,      # A30 MIG 1g slice, 6GB
 }
 
-# Map detected GPU names from sinfo to SLURM GRES names
+# Map lowercased GPU names from sinfo to SLURM GRES names (preserving case)
 GPU_NAME_MAP: Dict[str, str] = {
-    "h200": "h200",
-    "h100": "h100",
-    "a100": "a100",
-    "a40": "a40",
-    "l40": "l40",
-    "a30": "a30",
-    "v100": "v100",
-    "v100s": "v100",
-    "rtx_a6000": "rtx_a6000",
-    "rtx_a5000": "rtx_a5000",
-    "rtx2080ti": "rtx2080ti",
-    "rtx_2080_ti": "rtx2080ti",
-    "t4": "t4",
+    "nvidia_h200_nvl": "nvidia_h200_nvl",
+    "nv-h100": "NV-H100",
+    "nvidia_h100_nvl": "nvidia_h100_nvl",
+    "nvidia_h100_pcie": "nvidia_h100_pcie",
+    "nv-l40": "NV-L40",
+    "nv-a30": "NV-A30",
+    "nvidia_a30_2g.12gb": "nvidia_a30_2g.12gb",
+    "nvidia_a30_1g.6gb": "nvidia_a30_1g.6gb",
+    "nv-v100-sxm2": "NV-V100-SXM2",
+    "nv-rtx5000": "NV-RTX5000",
+    "nv-rtx-a4000": "NV-RTX-A4000",
+    "nv-rtx2080ti": "NV-RTX2080Ti",
+    "nv-rtx2070": "NV-RTX2070",
 }
 
 
@@ -264,12 +267,12 @@ def get_available_gpus(config: Config, partition: Optional[str] = None) -> Dict[
 def select_best_gpu(config: Config, partition: Optional[str] = None) -> str:
     """Select the highest-priority available GPU on the given partition.
 
-    Returns the GRES GPU type name (e.g. 'h100', 'a100').
-    Falls back to 'rtx2080ti' if nothing is detected.
+    Returns the GRES GPU type name (e.g. 'nvidia_h200_nvl', 'NV-A30').
+    Falls back to 'NV-RTX2080Ti' if nothing is detected.
     """
     available = get_available_gpus(config, partition)
     if not available:
-        return "rtx2080ti"
+        return "NV-RTX2080Ti"
 
     best_type = max(available, key=lambda g: GPU_PRIORITY.get(g, 0))
     return best_type
